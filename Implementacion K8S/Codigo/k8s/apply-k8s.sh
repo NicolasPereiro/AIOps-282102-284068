@@ -15,19 +15,41 @@ fi
 # Verificar que minikube está corriendo
 if ! minikube status &> /dev/null; then
     echo "Error: Minikube no está corriendo."
-    echo "Ejecuta: minikube start --memory=6144 --cpus=4"
+    echo "Ejecuta: minikube start y agrega cuatro workers con minikube node add --worker"
     exit 1
 fi
 
 echo ""
-echo "1. Etiquetando nodo (requerido para que los pods se programen)..."
-NODE_NAME=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-if [ -n "$NODE_NAME" ]; then
-    kubectl label nodes $NODE_NAME node-type=all --overwrite 2>/dev/null || true
-    echo "   Nodo $NODE_NAME etiquetado con node-type=all"
-else
-    echo "   No se pudo obtener el nombre del nodo. Continuando..."
-fi
+echo "1. Validando y etiquetando los nodos del despliegue..."
+REQUIRED_NODES=(minikube minikube-m02 minikube-m03 minikube-m04 minikube-m05)
+
+for node in "${REQUIRED_NODES[@]}"; do
+  if ! kubectl get node "$node" >/dev/null 2>&1; then
+    echo "Error: No se encontró el nodo $node. Se requieren cinco nodos Kubernetes."
+    echo "Agrega workers con: minikube node add --worker"
+    exit 1
+  fi
+  kubectl wait --for=condition=Ready "node/$node" --timeout=120s >/dev/null
+done
+
+# La etiqueta workload determina en qué nodo puede ejecutarse cada componente.
+kubectl label nodes minikube workload=platform --overwrite
+kubectl label nodes minikube-m02 workload=frontend --overwrite
+kubectl label nodes minikube-m03 workload=users --overwrite
+kubectl label nodes minikube-m04 workload=pharmacy --overwrite
+kubectl label nodes minikube-m05 workload=gateway --overwrite
+
+# Elimina la etiqueta anterior para evitar que manifiestos viejos permitan
+# programar componentes en cualquier nodo.
+for node in "${REQUIRED_NODES[@]}"; do
+  kubectl label nodes "$node" node-type- >/dev/null 2>&1 || true
+done
+
+echo "   platform: minikube"
+echo "   frontend: minikube-m02"
+echo "   users:    minikube-m03"
+echo "   pharmacy: minikube-m04"
+echo "   gateway:  minikube-m05"
 
 echo ""
 echo "2. Creando namespace..."
@@ -73,19 +95,9 @@ kubectl apply -f deployments/ops/db-deployment.yaml
 
 echo ""
 echo "   Esperando a que la base de datos esté lista..."
-timeout=0
-max_timeout=300
-while [ $timeout -lt $max_timeout ]; do
-    pod_ready=$(kubectl get pod -l app=pharmago-db -n pharmago -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
-    if [ "$pod_ready" = "True" ]; then
-        echo "   Base de datos lista!"
-        break
-    fi
-    sleep 5
-    timeout=$((timeout + 5))
-    echo "   Esperando... ($timeout/$max_timeout segundos)"
-done
-if [ $timeout -ge $max_timeout ]; then
+if kubectl wait --for=condition=Ready pod -l app=pharmago-db -n pharmago --timeout=300s; then
+    echo "   Base de datos lista!"
+else
     echo "   Timeout esperando la base de datos. Continuando..."
 fi
 
@@ -97,19 +109,9 @@ kubectl apply -f deployments/ops/elasticsearch-deployment.yaml
 
 # Esperar a que Elasticsearch esté listo
 echo "   Esperando a que Elasticsearch esté listo..."
-timeout=0
-max_timeout=300
-while [ $timeout -lt $max_timeout ]; do
-    pod_ready=$(kubectl get pod -l app=elasticsearch -n pharmago -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
-    if [ "$pod_ready" = "True" ]; then
-        echo "   Elasticsearch listo!"
-        break
-    fi
-    sleep 5
-    timeout=$((timeout + 5))
-    echo "   Esperando... ($timeout/$max_timeout segundos)"
-done
-if [ $timeout -ge $max_timeout ]; then
+if kubectl wait --for=condition=Ready pod -l app=elasticsearch -n pharmago --timeout=300s; then
+    echo "   Elasticsearch listo!"
+else
     echo "   Timeout esperando Elasticsearch. Continuando..."
 fi
 

@@ -21,9 +21,9 @@ spec:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
             - matchExpressions:
-              - key: node-type
+              - key: workload
                 operator: In
-                values: [ops, all]
+                values: [platform]
       securityContext:
         fsGroup: 65534
       # InitContainer para configurar permisos del volumen

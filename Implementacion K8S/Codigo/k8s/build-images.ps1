@@ -1,4 +1,4 @@
-# Script para construir y cargar imágenes Docker en Minikube (multi-nodo)
+# Script para construir y cargar imágenes Docker en Minikube (cinco nodos)
 # Funciona en Windows PowerShell
 # Uso: .\build-images.ps1
 
@@ -13,7 +13,7 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
 # Verificar que minikube está corriendo
 $minikubeStatus = minikube status 2>&1
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "Error: Minikube no está corriendo. Ejecuta: minikube start --nodes 3" -ForegroundColor Red
+    Write-Host "Error: Minikube no está corriendo. Ejecuta: minikube start" -ForegroundColor Red
     exit 1
 }
 

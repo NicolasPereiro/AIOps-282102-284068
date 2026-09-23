@@ -16,11 +16,10 @@ spec:
     required:
       nodeSelectorTerms:
       - matchExpressions:
-        - key: node-type
+        - key: workload
           operator: In
           values:
-          - ops
-          - all
+          - platform
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

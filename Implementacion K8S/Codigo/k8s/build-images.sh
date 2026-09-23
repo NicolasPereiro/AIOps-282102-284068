@@ -1,5 +1,5 @@
 #!/bin/bash
-# Script para construir y cargar imágenes Docker en Minikube (multi-nodo)
+# Script para construir y cargar imágenes Docker en Minikube (cinco nodos)
 # Funciona en Linux y Mac
 # Uso: ./build-images.sh
 
@@ -15,7 +15,7 @@ fi
 
 # Verificar que minikube está corriendo
 if ! minikube status &> /dev/null; then
-    echo "Error: Minikube no está corriendo. Ejecuta: minikube start --nodes 3"
+    echo "Error: Minikube no está corriendo. Ejecuta: minikube start"
     exit 1
 fi
 

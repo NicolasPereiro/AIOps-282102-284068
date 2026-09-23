@@ -12,26 +12,44 @@ if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
 # Verificar que el cluster Kubernetes está accesible
 $nodes = kubectl get nodes -o jsonpath='{.items[*].metadata.name}' 2>&1
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrEmpty($nodes)) {
-    Write-Host "Error: No hay cluster Kubernetes accesible. Si usas Minikube: minikube start (o minikube start --nodes 3)" -ForegroundColor Red
+    Write-Host "Error: No hay cluster Kubernetes accesible. Si usas Minikube: minikube start" -ForegroundColor Red
     exit 1
 }
 
-# Etiquetar nodos (requerido para que los pods de telemetría se programen)
-Write-Host "`n1. Etiquetando nodos..." -ForegroundColor Yellow
-$nodeList = $nodes.Trim().Split(" ", [StringSplitOptions]::RemoveEmptyEntries)
-if ($nodeList.Count -eq 1) {
-    Write-Host "   Cluster de 1 nodo detectado. Etiquetando $($nodeList[0]) con node-type=all" -ForegroundColor Cyan
-    kubectl label nodes $nodeList[0] node-type=all --overwrite 2>$null
-} elseif ($nodeList.Count -ge 3) {
-    Write-Host "   Cluster multi-nodo detectado. Etiquetando nodos..." -ForegroundColor Cyan
-    kubectl label nodes minikube node-type=frontend --overwrite 2>$null
-    kubectl label nodes minikube-m02 node-type=backend --overwrite 2>$null
-    kubectl label nodes minikube-m03 node-type=ops --overwrite 2>$null
-} else {
-    $firstNode = $nodeList[0]
-    Write-Host "   Etiquetando nodo $firstNode con node-type=all (compatibilidad)" -ForegroundColor Cyan
-    kubectl label nodes $firstNode node-type=all --overwrite 2>$null
+Write-Host "`n1. Validando y etiquetando los nodos..." -ForegroundColor Yellow
+$requiredNodes = @("minikube", "minikube-m02", "minikube-m03", "minikube-m04", "minikube-m05")
+foreach ($node in $requiredNodes) {
+    kubectl get node $node *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Error: No se encontró el nodo $node. Se requieren cinco nodos Kubernetes." -ForegroundColor Red
+        Write-Host "Agrega workers con: minikube node add --worker" -ForegroundColor Yellow
+        exit 1
+    }
+    kubectl wait --for=condition=Ready "node/$node" --timeout=120s *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Error: El nodo $node no está Ready." -ForegroundColor Red
+        exit 1
+    }
 }
+
+# La etiqueta workload determina en qué nodo puede ejecutarse cada componente.
+kubectl label nodes minikube workload=platform --overwrite
+kubectl label nodes minikube-m02 workload=frontend --overwrite
+kubectl label nodes minikube-m03 workload=users --overwrite
+kubectl label nodes minikube-m04 workload=pharmacy --overwrite
+kubectl label nodes minikube-m05 workload=gateway --overwrite
+
+# Elimina la etiqueta anterior para evitar que manifiestos viejos permitan
+# programar componentes en cualquier nodo.
+foreach ($node in $requiredNodes) {
+    kubectl label nodes $node node-type- 2>$null | Out-Null
+}
+
+Write-Host "   platform: minikube" -ForegroundColor Cyan
+Write-Host "   frontend: minikube-m02" -ForegroundColor Cyan
+Write-Host "   users:    minikube-m03" -ForegroundColor Cyan
+Write-Host "   pharmacy: minikube-m04" -ForegroundColor Cyan
+Write-Host "   gateway:  minikube-m05" -ForegroundColor Cyan
 Write-Host "   Verificar: kubectl get nodes --show-labels" -ForegroundColor Gray
 
 Write-Host "`n2. Creando namespace..." -ForegroundColor Yellow
@@ -55,9 +73,15 @@ Write-Host "`n5. Creando StorageClass y PersistentVolumes..." -ForegroundColor Y
 kubectl apply -f persistent-volumes\storage-class.yaml
 if ($LASTEXITCODE -ne 0) { exit 1 }
 
-# Eliminar PVs existentes en estado Released para recrearlos
+# Eliminar solamente PVs huérfanos en estado Released/Failed para recrearlos.
+# Los PVs Bound no deben eliminarse automáticamente porque contienen datos.
 Write-Host "   Limpiando PVs existentes..." -ForegroundColor Cyan
-kubectl delete pv sql-pv elasticsearch-pv prometheus-pv grafana-pv --ignore-not-found=true
+foreach ($pv in @("sql-pv", "elasticsearch-pv", "prometheus-pv", "grafana-pv")) {
+    $status = kubectl get pv $pv -o jsonpath='{.status.phase}' 2>$null
+    if ($status -eq "Released" -or $status -eq "Failed") {
+        kubectl delete pv $pv --ignore-not-found=true
+    }
+}
 Start-Sleep -Seconds 2
 
 kubectl apply -f persistent-volumes\sql-pv.yaml
@@ -72,23 +96,13 @@ kubectl apply -f deployments\ops\db-deployment.yaml
 if ($LASTEXITCODE -ne 0) { exit 1 }
 
 Write-Host "`n   Esperando a que la base de datos esté lista..." -ForegroundColor Yellow
-# Esperar a que el pod esté Ready
-$timeout = 0
-$maxTimeout = 300
-do {
-    $podReady = kubectl get pod -l app=pharmago-db -n pharmago -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}' 2>&1
-    if ($podReady -eq "True") {
-        Write-Host "   Base de datos lista!" -ForegroundColor Green
-        break
-    }
-    Start-Sleep -Seconds 5
-    $timeout += 5
-    if ($timeout -ge $maxTimeout) {
-        Write-Host "   Timeout esperando la base de datos. Continuando..." -ForegroundColor Yellow
-        break
-    }
-    Write-Host "   Esperando... ($timeout/$maxTimeout segundos)" -ForegroundColor Cyan
-} while ($true)
+$dbWait = kubectl wait --for=condition=Ready pod -l app=pharmago-db -n pharmago --timeout=300s 2>&1
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "   Base de datos lista!" -ForegroundColor Green
+} else {
+    Write-Host "   Timeout esperando la base de datos. Continuando..." -ForegroundColor Yellow
+    Write-Host "   $dbWait" -ForegroundColor Gray
+}
 
 Write-Host "`n7. Desplegando servicios de observabilidad..." -ForegroundColor Yellow
 # Elasticsearch primero
@@ -97,22 +111,13 @@ kubectl apply -f deployments\ops\elasticsearch-deployment.yaml
 
 # Esperar a que Elasticsearch esté listo
 Write-Host "   Esperando a que Elasticsearch esté listo..." -ForegroundColor Yellow
-$timeout = 0
-$maxTimeout = 300
-do {
-    $podReady = kubectl get pod -l app=elasticsearch -n pharmago -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}' 2>&1
-    if ($podReady -eq "True") {
-        Write-Host "   Elasticsearch listo!" -ForegroundColor Green
-        break
-    }
-    Start-Sleep -Seconds 5
-    $timeout += 5
-    if ($timeout -ge $maxTimeout) {
-        Write-Host "   Timeout esperando Elasticsearch. Continuando..." -ForegroundColor Yellow
-        break
-    }
-    Write-Host "   Esperando... ($timeout/$maxTimeout segundos)" -ForegroundColor Cyan
-} while ($true)
+$elasticsearchWait = kubectl wait --for=condition=Ready pod -l app=elasticsearch -n pharmago --timeout=300s 2>&1
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "   Elasticsearch listo!" -ForegroundColor Green
+} else {
+    Write-Host "   Timeout esperando Elasticsearch. Continuando..." -ForegroundColor Yellow
+    Write-Host "   $elasticsearchWait" -ForegroundColor Gray
+}
 
 # Resto de servicios ops
 kubectl apply -f services\ops\otel-collector-service.yaml
@@ -131,6 +136,11 @@ kubectl apply -f deployments\ops\grafana-deployment.yaml
 
 kubectl apply -f services\ops\kibana-service.yaml
 kubectl apply -f deployments\ops\kibana-deployment.yaml
+
+kubectl apply -f deployments\ops\fluent-bit-serviceaccount.yaml
+kubectl apply -f deployments\ops\fluent-bit-clusterrole.yaml
+kubectl apply -f deployments\ops\fluent-bit-clusterrolebinding.yaml
+kubectl apply -f deployments\ops\fluent-bit-daemonset.yaml
 
 if ($LASTEXITCODE -ne 0) { exit 1 }
 

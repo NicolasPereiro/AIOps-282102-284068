@@ -18,9 +18,9 @@ spec:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
             - matchExpressions:
-              - key: node-type
+              - key: workload
                 operator: In
-                values: [backend, all]
+                values: [gateway]
       containers:
       - name: pharmago-api-gateway
         image: pharmago-api-gateway:latest

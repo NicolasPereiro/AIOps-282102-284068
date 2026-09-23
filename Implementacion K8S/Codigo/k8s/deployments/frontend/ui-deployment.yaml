@@ -18,9 +18,9 @@ spec:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
             - matchExpressions:
-              - key: node-type
+              - key: workload
                 operator: In
-                values: [frontend, all]
+                values: [frontend]
       containers:
       - name: pharmago-ui
         image: pharmago-ui:latest

@@ -18,9 +18,9 @@ spec:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
             - matchExpressions:
-              - key: node-type
+              - key: workload
                 operator: In
-                values: [backend, all]
+                values: [pharmacy]
       containers:
       - name: pharmago-pharmacy-service
         image: pharmago-pharmacy-service:latest

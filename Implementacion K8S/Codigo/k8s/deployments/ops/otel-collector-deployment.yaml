@@ -18,9 +18,9 @@ spec:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
             - matchExpressions:
-              - key: node-type
+              - key: workload
                 operator: In
-                values: [ops, all]
+                values: [platform]
       containers:
       - name: otlp-collector
         image: otel/opentelemetry-collector-contrib:latest
