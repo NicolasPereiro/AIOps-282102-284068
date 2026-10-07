@@ -4,7 +4,12 @@ metadata:
   name: pharmago-ui
   namespace: pharmago
 spec:
-  replicas: 1
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app: pharmago-ui
@@ -46,4 +51,3 @@ spec:
             port: 80
           initialDelaySeconds: 30
           periodSeconds: 10
-

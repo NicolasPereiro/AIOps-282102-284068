@@ -10,6 +10,7 @@ using Yarp.ReverseProxy.Transforms;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddMemoryCache();
+builder.Services.AddHealthChecks();
 
 var rateLimitMode = builder.Configuration["RateLimiting:Mode"] ?? "IP";
 
@@ -79,6 +80,9 @@ if (app.Environment.IsDevelopment())
 
 app.UseMetricsMiddleware();
 
+// Patrón de resiliencia: mitigación ante ataques con alto volumen de solicitudes fallidas
+app.UseFailedRequestsThrottling();
+
 if (rateLimitMode.Equals("IP", StringComparison.OrdinalIgnoreCase))
 {
     app.UseIpRateLimiting();
@@ -90,6 +94,7 @@ else if (rateLimitMode.Equals("User", StringComparison.OrdinalIgnoreCase))
 
 app.UseAuthorization();
 
+app.MapHealthChecks("/health");
 app.MapReverseProxy();
 app.MapPrometheusScrapingEndpoint();
 
@@ -97,4 +102,3 @@ app.Run();
 
 [ExcludeFromCodeCoverage]
 public partial class Program { }
-

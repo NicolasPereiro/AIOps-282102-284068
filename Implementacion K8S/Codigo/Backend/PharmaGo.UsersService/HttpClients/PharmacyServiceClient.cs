@@ -1,6 +1,7 @@
 using PharmaGo.Domain.Entities;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
+using Polly.CircuitBreaker;
 
 namespace PharmaGo.UsersService.HttpClients
 {
@@ -31,6 +32,11 @@ namespace PharmaGo.UsersService.HttpClients
                 }
                 
                 _logger.LogWarning($"Failed to get pharmacy {id} from PharmacyService. Status: {response.StatusCode}");
+                return null;
+            }
+            catch (BrokenCircuitException ex)
+            {
+                _logger.LogWarning(ex, "Circuit Breaker está ABIERTO para llamadas a PharmacyService. Retornando fallback.");
                 return null;
             }
             catch (Exception ex)
