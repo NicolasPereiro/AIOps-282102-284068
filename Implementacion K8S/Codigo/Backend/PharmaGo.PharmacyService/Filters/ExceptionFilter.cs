@@ -6,27 +6,35 @@ using Microsoft.Data.SqlClient.Server;
 namespace PharmaGo.PharmacyService.Filters;
 public class ExceptionFilter : IExceptionFilter
 {
+    private readonly ILogger<ExceptionFilter> _logger;
+
+    public ExceptionFilter(ILogger<ExceptionFilter> logger)
+    {
+        _logger = logger;
+    }
+
     public void OnException(ExceptionContext context)
     {
-        try
+        var exception = context.Exception;
+
+        if (exception is ResourceNotFoundException)
         {
-            throw context.Exception;
+            context.Result = new JsonResult(new { Message = exception.Message }) { StatusCode = 404 };
         }
-        catch (ResourceNotFoundException e)
+        else if (exception is InvalidResourceException)
         {
-            context.Result = new JsonResult(new {Message = e.Message }) { StatusCode = 404 };
+            context.Result = new JsonResult(new { Message = exception.Message }) { StatusCode = 400 };
         }
-        catch (InvalidResourceException e)
+        else if (exception is FormatException)
         {
-            context.Result = new JsonResult(new { Message = e.Message }) { StatusCode = 400 };
+            context.Result = new JsonResult(new { Message = "Invalid token format" }) { StatusCode = 400 };
         }
-        catch (FormatException e)
+        else
         {
-            context.Result = new JsonResult(new { Message = "Invalid token format" }){ StatusCode = 400 };
+            _logger.LogError(exception, "Unhandled exception captured by ExceptionFilter");
+            context.Result = new JsonResult(new { Message = exception.Message }) { StatusCode = 500 };
         }
-        catch (Exception e)
-        {
-            context.Result = new JsonResult(new { Message = e.Message }) { StatusCode = 500 };
-        }
+
+        context.ExceptionHandled = true;
     }
 }

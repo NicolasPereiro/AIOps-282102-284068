@@ -1,6 +1,8 @@
 using System.Diagnostics.CodeAnalysis;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
+using OpenTelemetry.Exporter;
 using AspNetCoreRateLimit;
 using PharmaGo.ApiGateway.Middleware;
 using Instrumentation;
@@ -9,6 +11,8 @@ using Yarp.ReverseProxy.Transforms;
 
 var builder = WebApplication.CreateBuilder(args);
 
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddScoped<IStructuredLogger, StructuredLogger>();
 builder.Services.AddMemoryCache();
 builder.Services.AddHealthChecks();
 
@@ -51,6 +55,18 @@ builder.Services.AddOpenTelemetry()
             .AddHttpClientInstrumentation()
             .AddMeter("PharmaGo.CustomMetrics")
             .AddPrometheusExporter();
+    })
+    .WithTracing(tracingBuilder =>
+    {
+        tracingBuilder
+            .SetResourceBuilder(ResourceBuilder.CreateDefault().AddService("PharmaGo.ApiGateway"))
+            .AddAspNetCoreInstrumentation()
+            .AddHttpClientInstrumentation()
+            .AddOtlpExporter(options =>
+            {
+                options.Endpoint = new Uri("http://otlp-collector:4317");
+                options.Protocol = OtlpExportProtocol.Grpc;
+            });
     });
 
 builder.Services.AddEndpointsApiExplorer();
@@ -72,6 +88,21 @@ var app = builder.Build();
 app.UseCors("MyAllowedOrigins");
 app.UseGatewayCorrelationId();
 
+app.Use(async (context, next) =>
+{
+    var correlationId = context.Items[CorrelationIdMiddlewareExtensions.HttpContextItemKey] as string ?? context.TraceIdentifier;
+    var loggerFactory = context.RequestServices.GetRequiredService<ILoggerFactory>();
+    var logger = loggerFactory.CreateLogger("ApiGateway");
+    using (logger.BeginScope(new Dictionary<string, object>
+    {
+        ["correlation_id"] = correlationId,
+        ["service"] = "PharmaGo.ApiGateway"
+    }))
+    {
+        await next();
+    }
+});
+
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
@@ -79,6 +110,26 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseMetricsMiddleware();
+
+// Registrar en logs las peticiones fallidas del gateway (4xx/5xx) para observabilidad en Kibana
+app.Use(async (context, next) =>
+{
+    await next();
+    var statusCode = context.Response.StatusCode;
+    if (statusCode >= 400)
+    {
+        var loggerFactory = context.RequestServices.GetRequiredService<ILoggerFactory>();
+        var logger = loggerFactory.CreateLogger("ApiGateway");
+        if (statusCode >= 500)
+        {
+            logger.LogError("Gateway request failed: {Method} {Path} -> {StatusCode}", context.Request.Method, context.Request.Path, statusCode);
+        }
+        else
+        {
+            logger.LogWarning("Gateway request failed: {Method} {Path} -> {StatusCode}", context.Request.Method, context.Request.Path, statusCode);
+        }
+    }
+});
 
 // Patrón de resiliencia: mitigación ante ataques con alto volumen de solicitudes fallidas
 app.UseFailedRequestsThrottling();

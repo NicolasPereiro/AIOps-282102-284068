@@ -54,6 +54,43 @@ Este documento resume los cambios técnicos implementados en el proyecto conform
 
 ---
 
-## 3. Tareas Pendientes
+## 3. Telemetría
+
+### Cumplimiento de la rúbrica (según "Obligatorio AIOps")
+
+| Requisito | Estado | Implementación |
+|---|---|---|
+| Logs estructurados en JSON | ✅ | Formateador JSON en ApiGateway, parser CRI en Fluent Bit, campos `LogLevel`, `Message`, `Category`, `correlation_id`, `pharma_biz` como JSON raíz en Elasticsearch |
+| Trazas de acuerdo a OTLP | ✅ | `.WithTracing(...)` en Users, Pharmacy y Gateway con exportador OTLP gRPC a `otlp-collector:4317`; pipeline `traces` en el collector |
+| Métricas a nivel de pod/contenedor y nodo (CPU, memoria, storage, red) | ✅ | Prometheus scrapea OTLP collector, users/pharmacy/gateway, node-exporter (nodo) y cAdvisor (pod/contenedor); dashboard "PharmaGo - Infra" en Grafana |
+| Métricas recolectadas con OTLP hacia Prometheus | ✅ | Servicios envían métricas OTLP al collector; collector exporta a Prometheus (`prometheus` exporter en puerto 8889) |
+| Logs consultables en Kibana + Elasticsearch | ✅ | Data View `pharmago-logs*`, dashboard "PharmaGo - Logs" con histograma por nivel, distribución por servicio, errores y visor estructurado |
+| Al menos 5 alertas en Grafana para detección de anomalías | ✅ | 5 reglas (errores HTTP >5%, latencia >1s, 429 >5 req/s, CPU >85%, memoria >85% riesgo OOM) |
+
+- **Logging de nivel Error**:
+  - Se agregó `ILogger` a los `ExceptionFilter` de Users y Pharmacy para registrar `LogError` cuando se captura una excepción no controlada (HTTP 500), incluyendo la excepción y el contexto de la petición.
+
+- **Trazas distribuidas (OpenTelemetry OTLP)**:
+  - Se habilitó `.WithTracing(...)` en `UsersService`, `PharmacyService` y `ApiGateway` con instrumentación ASP.NET Core y HttpClient, exportando vía OTLP (gRPC) a `http://otlp-collector:4317`.
+  - Se habilitó el pipeline `traces` en el OpenTelemetry Collector (`otel-collector-config.yaml`).
+  - Validado: el collector recibe y exporta spans de los tres servicios (Gateway, Users, Pharmacy), con propagación de contexto (`traceparent` / `X-Correlation-ID`).
+
+- **Alertas de Grafana**:
+  - ConfigMap `grafana-alerting.yaml` con 5 reglas de anomalías: tasa de errores HTTP > 5%, latencia media > 1s, rate limit 429 > 5 req/s, CPU pod > 85%, memoria > 85% (riesgo OOM).
+  - Montado en el deployment de Grafana bajo `/etc/grafana/provisioning/alerting/`.
+  - Validación integrada en `setup-dashboards.ps1` (consulta `api/v1/provisioning/alert-rules`).
+
+- **Script de tráfico mixto (`traffic-generator.ps1`)**:
+  - Ubicación: `Implementacion K8S/Codigo/chaos-engineering/traffic-generator.ps1`.
+  - Genera peticiones HTTP mixtas (códigos 200 y 4XX: 400, 401, 404 y 429) contra los servicios de Users y Pharmacy a través del API Gateway (`http://127.0.0.1:5000`).
+  - Obtiene tokens de sesión con las credenciales sembradas (`admin`, `empleado`, `duenio`) para ejercitar endpoints protegidos y generar 401 en accesos sin token.
+  - Ejecuta con un pool de runspaces configurable (`-Concurrency`) y exporta el detalle de cada petición a `traffic-results.csv`, incluyendo resumen por código de estado y por endpoint.
+  - Parámetros principales: `-TotalRequests`, `-Concurrency`, `-DelayMs`, `-BaseUrl`, `-UsersServiceUrl`, `-OutputCsv`.
+  - Requiere port-forward activo y ~60 s entre corridas para no quedar bloqueado por el rate limit del gateway (o usar `-DelayMs`).
+  - Actualiza también `chaos-engineering/README.md` con su documentación.
+
+---
+
+## 4. Tareas Pendientes
 
 - [ ] **Script de Ingeniería del Caos para Alta Disponibilidad**: Implementar script específico de caos para simular y validar de forma automatizada la auto-curación de pods y la activación del patrón de mitigación ante solicitudes fallidas.

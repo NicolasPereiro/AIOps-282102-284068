@@ -1,0 +1,213 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-alerting
+  namespace: pharmago
+data:
+  pharmago-alerts.yml: |
+    apiVersion: 1
+    groups:
+      - orgId: 1
+        name: pharmago-alerts
+        folder: PharmaGo
+        interval: 1m
+        rules:
+          - uid: pharmago-error-rate
+            title: "Tasa de errores HTTP > 5%"
+            condition: C
+            data:
+              - refId: A
+                relativeTimeRange:
+                  from: 300
+                  to: 0
+                datasourceUid: prometheus
+                model:
+                  expr: 'sum(rate(pharmago_http_errors_total[5m])) / sum(rate(pharmago_http_requests_total[5m])) * 100'
+                  instant: true
+                  refId: A
+              - refId: C
+                relativeTimeRange:
+                  from: 300
+                  to: 0
+                datasourceUid: __expr__
+                model:
+                  type: threshold
+                  expression: A
+                  conditions:
+                    - evaluator:
+                        params: [5]
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params: [A]
+                      reducer:
+                        type: last
+                      type: query
+            noDataState: NoData
+            execErrState: Error
+            for: 1m
+            annotations:
+              summary: "Tasa de errores HTTP superior al 5%"
+            labels:
+              severity: critical
+
+          - uid: pharmago-latency
+            title: "Latencia media > 1s"
+            condition: C
+            data:
+              - refId: A
+                relativeTimeRange:
+                  from: 300
+                  to: 0
+                datasourceUid: prometheus
+                model:
+                  expr: 'rate(pharmago_http_request_duration_milliseconds_sum[5m]) / rate(pharmago_http_request_duration_milliseconds_count[5m])'
+                  instant: true
+                  refId: A
+              - refId: C
+                relativeTimeRange:
+                  from: 300
+                  to: 0
+                datasourceUid: __expr__
+                model:
+                  type: threshold
+                  expression: A
+                  conditions:
+                    - evaluator:
+                        params: [1000]
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params: [A]
+                      reducer:
+                        type: last
+                      type: query
+            noDataState: NoData
+            execErrState: Error
+            for: 1m
+            annotations:
+              summary: "Latencia media superior a 1 segundo"
+            labels:
+              severity: warning
+
+          - uid: pharmago-rate-limit-429
+            title: "Rate Limit 429 > 5 req/s"
+            condition: C
+            data:
+              - refId: A
+                relativeTimeRange:
+                  from: 60
+                  to: 0
+                datasourceUid: prometheus
+                model:
+                  expr: 'sum(rate(pharmago_http_requests_total{status_code="429"}[1m]))'
+                  instant: true
+                  refId: A
+              - refId: C
+                relativeTimeRange:
+                  from: 60
+                  to: 0
+                datasourceUid: __expr__
+                model:
+                  type: threshold
+                  expression: A
+                  conditions:
+                    - evaluator:
+                        params: [5]
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params: [A]
+                      reducer:
+                        type: last
+                      type: query
+            noDataState: NoData
+            execErrState: Error
+            for: 1m
+            annotations:
+              summary: "Mas de 5 respuestas HTTP 429 por segundo (posible DoS)"
+            labels:
+              severity: critical
+
+          - uid: pharmago-cpu-high
+            title: "CPU pod > 85%"
+            condition: C
+            data:
+              - refId: A
+                relativeTimeRange:
+                  from: 300
+                  to: 0
+                datasourceUid: prometheus
+                model:
+                  expr: '(sum(rate(container_cpu_usage_seconds_total{namespace="pharmago",container!="",container!="POD"}[5m])) by (pod) / sum(container_spec_cpu_quota{namespace="pharmago",container!="",container!="POD"} / container_spec_cpu_period{namespace="pharmago",container!="",container!="POD"}) by (pod)) * 100'
+                  instant: true
+                  refId: A
+              - refId: C
+                relativeTimeRange:
+                  from: 300
+                  to: 0
+                datasourceUid: __expr__
+                model:
+                  type: threshold
+                  expression: A
+                  conditions:
+                    - evaluator:
+                        params: [85]
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params: [A]
+                      reducer:
+                        type: last
+                      type: query
+            noDataState: NoData
+            execErrState: Error
+            for: 2m
+            annotations:
+              summary: "Uso de CPU del pod superior al 85% del limite asignado"
+            labels:
+              severity: warning
+
+          - uid: pharmago-memory-oom
+            title: "Riesgo OOM memoria > 85%"
+            condition: C
+            data:
+              - refId: A
+                relativeTimeRange:
+                  from: 300
+                  to: 0
+                datasourceUid: prometheus
+                model:
+                  expr: 'container_memory_working_set_bytes{namespace="pharmago",container!="",container!="POD"} / container_spec_memory_limit_bytes{namespace="pharmago",container!="",container!="POD"} * 100'
+                  instant: true
+                  refId: A
+              - refId: C
+                relativeTimeRange:
+                  from: 300
+                  to: 0
+                datasourceUid: __expr__
+                model:
+                  type: threshold
+                  expression: A
+                  conditions:
+                    - evaluator:
+                        params: [85]
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params: [A]
+                      reducer:
+                        type: last
+                      type: query
+            noDataState: NoData
+            execErrState: Error
+            for: 2m
+            annotations:
+              summary: "Consumo de memoria superior al 85% del limite (riesgo OOM)"
+            labels:
+              severity: critical

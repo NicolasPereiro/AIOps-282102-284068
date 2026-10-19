@@ -21,4 +21,7 @@ data:
         metrics:
           receivers: [otlp]
           exporters: [prometheus, debug]
+        traces:
+          receivers: [otlp]
+          exporters: [debug]
 
