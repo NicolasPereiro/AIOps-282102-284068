@@ -182,7 +182,7 @@ data:
                   to: 0
                 datasourceUid: prometheus
                 model:
-                  expr: 'container_memory_working_set_bytes{namespace="pharmago",container!="",container!="POD"} / container_spec_memory_limit_bytes{namespace="pharmago",container!="",container!="POD"} * 100'
+                  expr: '(container_memory_working_set_bytes{namespace="pharmago",container!="",container!="POD"} / container_spec_memory_limit_bytes{namespace="pharmago",container!="",container!="POD"} * 100) and on (pod, container) (container_spec_memory_limit_bytes{namespace="pharmago",container!="",container!="POD"} > 0)'
                   instant: true
                   refId: A
               - refId: C
