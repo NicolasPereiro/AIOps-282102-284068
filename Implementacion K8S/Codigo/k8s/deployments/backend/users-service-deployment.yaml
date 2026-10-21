@@ -18,11 +18,15 @@ spec:
       labels:
         app: pharmago-users-service
     spec:
+      # Afinidad blanda (declarativa): este entorno corre en un único nodo
+      # físico (minikube), por lo que la separación por label `workload` se
+      # expresa como preferencia y no como requisito de scheduling.
       affinity:
         nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-            - matchExpressions:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
               - key: workload
                 operator: In
                 values: [users]

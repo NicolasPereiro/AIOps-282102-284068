@@ -2,44 +2,34 @@
 
 ## Arquitectura Kubernetes
 
-El despliegue local de PharmaGo utiliza Minikube con cinco nodos Kubernetes. Si
-el cluster todavía tiene solamente el nodo `minikube`, deben agregarse cuatro
-workers:
+El despliegue local de PharmaGo utiliza Minikube con un único nodo Kubernetes.
+Todos los componentes corren en el nodo `minikube`, iniciado con recursos
+suficientes para el stack completo:
 
 ```bash
-minikube node add --worker
-minikube node add --worker
-minikube node add --worker
-minikube node add --worker
+minikube start --memory=6144 --cpus=4
 ```
 
-La distribución obligatoria es:
-
-| Nodo | Label `workload` | Componentes principales |
-|---|---|---|
-| `minikube` | `platform` | SQL Server, OTEL Collector, Prometheus, Grafana, Elasticsearch y Kibana |
-| `minikube-m02` | `frontend` | Frontend Angular servido por Nginx |
-| `minikube-m03` | `users` | Users Service |
-| `minikube-m04` | `pharmacy` | Pharmacy Service |
-| `minikube-m05` | `gateway` | API Gateway |
-
-Los labels se pueden aplicar manualmente con:
+El nodo se etiqueta `workload=platform` para anclar los componentes de
+plataforma y sus PersistentVolumes:
 
 ```bash
 kubectl label node minikube workload=platform --overwrite
-kubectl label node minikube-m02 workload=frontend --overwrite
-kubectl label node minikube-m03 workload=users --overwrite
-kubectl label node minikube-m04 workload=pharmacy --overwrite
-kubectl label node minikube-m05 workload=gateway --overwrite
 ```
 
-Los Deployments usan afinidad obligatoria hacia su label `workload`. No se debe
-reintroducir `node-type=all`, porque permitiría que varios microservicios fueran
-programados en el mismo nodo.
+Los componentes de plataforma (SQL Server, OTEL Collector, Prometheus, Grafana,
+Elasticsearch y Kibana) usan afinidad **obligatoria** (`required`) hacia
+`workload=platform`, y los PersistentVolumes se anclan al mismo label.
 
-Fluent Bit y Node Exporter son excepciones intencionales: son DaemonSets y deben
-ejecutar una instancia por nodo para recolectar logs y métricas de toda la
-infraestructura.
+Los microservicios (Frontend Angular, Users Service, Pharmacy Service y API
+Gateway) declaran afinidad **blanda** (`preferred`) hacia su propio label
+`workload` (`frontend`, `users`, `pharmacy`, `gateway`). En un entorno de un
+solo nodo esta separación es **declarativa/demostrativa**: expresa la intención
+de aislamiento por label sin bloquear el scheduling, y cada microservicio corre
+en pods independientes.
+
+Fluent Bit y Node Exporter son DaemonSets: en este despliegue de un solo nodo
+ejecutan una única instancia que recolecta logs y métricas de la infraestructura.
 
 ## Flujo de trabajo
 
@@ -78,6 +68,8 @@ pruebas locales se deben mantener los port-forwards documentados en
 
 ## Limitación de Minikube
 
-Los nodos de Minikube son contenedores Docker sobre la misma máquina física. La
-separación demostrada es separación entre nodos Kubernetes; un entorno productivo
-requeriría hosts físicos o máquinas virtuales independientes.
+Minikube corre como un contenedor Docker sobre la misma máquina física. En este
+despliegue de un solo nodo no hay separación física real entre microservicios:
+la separación por label `workload` es declarativa (afinidad blanda). Un entorno
+productivo debería desplegar cada microservicio en hosts físicos o máquinas
+virtuales independientes, usando la misma afinidad como requisito obligatorio.

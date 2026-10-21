@@ -1,42 +1,28 @@
 # Bosquejo del diagrama de despliegue
 
-El siguiente diagrama representa la distribución de la plataforma en Minikube.
+El siguiente diagrama representa la distribución de la plataforma en Minikube,
+desplegada sobre un único nodo Kubernetes.
 
 ```mermaid
 flowchart TB
     browser[Usuario / navegador]
 
     subgraph cluster[Cluster Kubernetes - Minikube]
-        subgraph platform[Nodo minikube - workload=platform]
+        subgraph node[Nodo único minikube - workload=platform]
             db[(SQL Server)]
             otel[OTEL Collector]
             prometheus[Prometheus]
             grafana[Grafana]
             elastic[Elasticsearch]
             kibana[Kibana]
-        end
-
-        subgraph frontendNode[Nodo minikube-m02 - workload=frontend]
             ui[Frontend Angular + Nginx]
             uiSvc[Service pharmago-ui]
-        end
-
-        subgraph usersNode[Nodo minikube-m03 - workload=users]
             users[Users Service]
             usersSvc[Service pharmago-users-service]
-        end
-
-        subgraph pharmacyNode[Nodo minikube-m04 - workload=pharmacy]
             pharmacy[Pharmacy Service]
             pharmacySvc[Service pharmago-pharmacy-service]
-        end
-
-        subgraph gatewayNode[Nodo minikube-m05 - workload=gateway]
             gateway[API Gateway]
             gatewaySvc[Service pharmago-api-gateway]
-        end
-
-        subgraph daemonsets[DaemonSets - una instancia por nodo]
             fluent[Fluent Bit]
             nodeExporter[Node Exporter]
         end
@@ -66,16 +52,31 @@ flowchart TB
 ## Evidencia esperada
 
 ```text
-pharmago-ui                  -> minikube-m02
-pharmago-users-service       -> minikube-m03
-pharmago-pharmacy-service    -> minikube-m04
-pharmago-api-gateway         -> minikube-m05
-pharmago-db                  -> minikube
-elasticsearch/prometheus/... -> minikube
-fluent-bit/node-exporter     -> todos los nodos
+Todos los componentes              -> minikube (nodo único, workload=platform)
+
+Plataforma (required → platform):
+  pharmago-db                      -> minikube
+  elasticsearch/prometheus/grafana -> minikube
+  otel-collector / kibana          -> minikube
+
+Microservicios (afinidad blanda/preferred por label workload):
+  pharmago-ui                  -> workload=frontend (declarativa)
+  pharmago-users-service       -> workload=users (declarativa)
+  pharmago-pharmacy-service    -> workload=pharmacy (declarativa)
+  pharmago-api-gateway         -> workload=gateway (declarativa)
+
+DaemonSets:
+  fluent-bit / node-exporter   -> una instancia en el nodo
 ```
 
+La separación de los microservicios por label `workload` es **declarativa**
+(afinidad blanda, `preferredDuringSchedulingIgnoredDuringExecution`): en este
+entorno de un solo nodo todos los pods comparten el nodo físico, pero los
+manifiestos expresan el aislamiento por label. En un entorno productivo
+multi-nodo, esa afinidad se elevaría a `required
+DuringSchedulingIgnoredDuringExecution` para que cada microservicio corra en un
+nodo físico distinto.
+
 El frontend es una aplicación estática: las llamadas HTTP al API se originan en
-el navegador. Por eso el frontend y el API Gateway pueden estar en nodos
-distintos sin requerir comunicación directa entre el contenedor Nginx y el
-Gateway.
+el navegador. Por eso el frontend y el API Gateway no requieren comunicación
+directa entre el contenedor Nginx y el Gateway.

@@ -6,20 +6,18 @@ Este documento resume los cambios técnicos implementados en el proyecto conform
 
 ## 1. Implementación de Plataforma
 
-- **Cluster Multirnodo (Minikube)**:
-  - Configuración de un cluster local con cinco nodos Kubernetes para separar los microservicios en nodos físicos independientes:
-    - `minikube` (`workload=platform`): Base de datos SQL Server y plataforma de observabilidad.
-    - `minikube-m02` (`workload=frontend`): Frontend Angular (`pharmago-ui`).
-    - `minikube-m03` (`workload=users`): Microservicio de usuarios (`pharmago-users-service`).
-    - `minikube-m04` (`workload=pharmacy`): Microservicio de operaciones de farmacia (`pharmago-pharmacy-service`).
-    - `minikube-m05` (`workload=gateway`): API Gateway YARP (`pharmago-api-gateway`).
+- **Cluster Minikube de un nodo**:
+  - Despliegue local en un único nodo Kubernetes (`minikube`), iniciado con `minikube start --memory=6144 --cpus=4`.
+  - El nodo se etiqueta `workload=platform` para anclar los componentes de plataforma (SQL Server, OTEL Collector, Prometheus, Grafana, Elasticsearch, Kibana) y sus PersistentVolumes.
+  - Cada microservicio corre en su propio pod independiente (Frontend Angular, Users Service, Pharmacy Service y API Gateway).
 
-- **Afinidad y Aislamiento de Cargas**:
-  - Configuración de `nodeAffinity` obligatoria (`requiredDuringSchedulingIgnoredDuringExecution`) en cada Deployment hacia su respectivo label `workload`, evitando la coexistencia de microservicios en un mismo nodo.
-  - Excepciones intencionales mediante DaemonSets (`fluent-bit` y `node-exporter`) para ejecutar un agente por nodo recolectando logs y métricas de infraestructura.
+- **Afinidad y Aislamiento de Cargas (declarativo)**:
+  - Los componentes de plataforma usan `nodeAffinity` obligatoria (`requiredDuringSchedulingIgnoredDuringExecution`) hacia `workload=platform`.
+  - Los microservicios declaran `nodeAffinity` **blanda** (`preferredDuringSchedulingIgnoredDuringExecution`, `weight: 100`) hacia su label `workload` (`frontend`, `users`, `pharmacy`, `gateway`). En este entorno de un solo nodo la separación es declarativa/demostrativa: expresa el aislamiento por label sin bloquear el scheduling. En un entorno productivo multi-nodo, esta misma afinidad se elevaría a `required` para garantizar que los microservicios no compartan nodo físico.
+  - Fluent Bit y Node Exporter son DaemonSets (una instancia por nodo).
 
 - **Almacenamiento Persistente**:
-  - PersistentVolumes y PersistentVolumeClaims configurados y anclados al nodo `platform` para SQL Server, Elasticsearch, Prometheus y Grafana.
+  - PersistentVolumes y PersistentVolumeClaims configurados y anclados al nodo `platform` mediante `workload=platform` para SQL Server, Elasticsearch, Prometheus y Grafana.
 
 - **Automatización**:
   - Scripts `build-images.ps1` / `build-images.sh` y `apply-k8s.ps1` / `apply-k8s.sh` para compilación, carga de imágenes y despliegue idempotente del cluster.

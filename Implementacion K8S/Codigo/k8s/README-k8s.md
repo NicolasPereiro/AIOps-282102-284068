@@ -1,19 +1,21 @@
 # Despliegue de PharmaGo en Kubernetes (Minikube)
 
-Esta guía describe cómo desplegar la aplicación PharmaGo en un cluster de Kubernetes usando Minikube con cinco nodos.
+Esta guía describe cómo desplegar la aplicación PharmaGo en un cluster de Kubernetes usando Minikube con un único nodo.
 
 ## Arquitectura
 
-La aplicación se distribuye por responsabilidad en cinco nodos Kubernetes:
+La aplicación corre en un único nodo Kubernetes (`minikube`), etiquetado
+`workload=platform`. Todos los componentes se despliegan en ese nodo:
 
-- **platform (`minikube`)**: base de datos y plataforma de observabilidad.
-- **frontend (`minikube-m02`)**: pharmago-ui.
-- **users (`minikube-m03`)**: pharmago-users-service.
-- **pharmacy (`minikube-m04`)**: pharmago-pharmacy-service.
-- **gateway (`minikube-m05`)**: pharmago-api-gateway.
-- **DaemonSets**: Fluent Bit y Node Exporter ejecutan una instancia en cada nodo.
+- **Plataforma** (`workload=platform`, afinidad requerida): base de datos SQL Server y plataforma de observabilidad (OTEL Collector, Prometheus, Grafana, Elasticsearch, Kibana).
+- **Microservicios** (afinidad blanda hacia su label `workload`): pharmago-ui (`frontend`), pharmago-users-service (`users`), pharmago-pharmacy-service (`pharmacy`) y pharmago-api-gateway (`gateway`).
+- **DaemonSets**: Fluent Bit y Node Exporter (una instancia en el nodo).
 
-**Requisito de memoria**: El nodo `platform` debe tener al menos 5-6GB de RAM para soportar Elasticsearch, Kibana, SQL Server Express y el resto de servicios de observabilidad.
+Cada microservicio corre en pods independientes. La separación por label
+`workload` es declarativa (afinidad blanda `preferred`), porque en este entorno
+de un solo nodo todos los pods comparten el nodo físico.
+
+**Requisito de memoria**: El nodo debe tener al menos 6GB de RAM para soportar Elasticsearch, Kibana, SQL Server y el resto de servicios de observabilidad junto con los microservicios.
 
 ## Prerrequisitos
 
@@ -23,33 +25,23 @@ La aplicación se distribuye por responsabilidad en cinco nodos Kubernetes:
 
 ## Configuración Inicial
 
-### 1. Crear o ampliar el cluster Minikube
+### 1. Crear el cluster Minikube (un nodo)
 
 ```bash
-# Si el perfil todavía no existe, crear el nodo principal con recursos suficientes.
+# Crear el nodo con recursos suficientes para todo el stack.
 minikube start --memory=6144 --cpus=4
 
-# Si todavía faltan workers, agregar cuatro para separar frontend y microservicios.
-minikube node add --worker
-minikube node add --worker
-minikube node add --worker
-minikube node add --worker
-
-# Verificar los cinco nodos
+# Verificar el nodo
 kubectl get nodes
 ```
 
-**Importante**: verifica la memoria disponible en el nodo `platform`. Con menos recursos, Elasticsearch y otros pods de observabilidad pueden fallar por OOM.
+**Importante**: verifica la memoria disponible en el nodo. Con menos recursos, Elasticsearch y otros pods de observabilidad pueden fallar por OOM.
 
-### 2. Etiquetar nodos
+### 2. Etiquetar el nodo
 
-El script de despliegue etiqueta los nodos automáticamente con `workload`. Si despliegas manualmente:
+El script de despliegue etiqueta el nodo automáticamente con `workload`. Si despliegas manualmente:
 ```bash
 kubectl label nodes minikube workload=platform --overwrite
-kubectl label nodes minikube-m02 workload=frontend --overwrite
-kubectl label nodes minikube-m03 workload=users --overwrite
-kubectl label nodes minikube-m04 workload=pharmacy --overwrite
-kubectl label nodes minikube-m05 workload=gateway --overwrite
 ```
 
 ### 3. Construir y cargar imágenes Docker
@@ -147,12 +139,8 @@ kubectl apply -f deployments/frontend/
 # Ver todos los pods
 kubectl get pods -n pharmago -o wide
 
-# Ver pods agrupados por nodo
+# Ver pods en el nodo único
 kubectl get pods -n pharmago -o wide --field-selector spec.nodeName=minikube
-kubectl get pods -n pharmago -o wide --field-selector spec.nodeName=minikube-m02
-kubectl get pods -n pharmago -o wide --field-selector spec.nodeName=minikube-m03
-kubectl get pods -n pharmago -o wide --field-selector spec.nodeName=minikube-m04
-kubectl get pods -n pharmago -o wide --field-selector spec.nodeName=minikube-m05
 ```
 
 ### Ver servicios
@@ -242,7 +230,7 @@ kubectl apply -f deployments/<component>/<deployment>.yaml
 
 Si los pods de telemetría (otel-collector, prometheus, grafana, elasticsearch, kibana, fluent-bit) quedan en `Pending`:
 
-1. **Falta o es incorrecta la etiqueta del nodo**: cada componente requiere un label `workload` específico.
+1. **Falta o es incorrecta la etiqueta del nodo**: la plataforma y los PVs requieren el label `workload=platform` en el nodo.
    - Usa el script `apply-k8s.sh` que etiqueta automáticamente, o
    - Verifica manualmente: `kubectl get nodes --show-labels`
    

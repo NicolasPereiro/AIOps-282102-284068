@@ -26,6 +26,9 @@ data:
         Tag               kube.*
         Path              /var/log/containers/*.log
         Parser            cri
+        # Leer cada archivo desde su inicio: por defecto (Off) tail empieza
+        # desde el final y se pierde el log de arranque de los servicios.
+        Read_from_Head    On
         DB                /var/log/flb_kube.db
         Mem_Buf_Limit     10MB
         Skip_Long_Lines   Off

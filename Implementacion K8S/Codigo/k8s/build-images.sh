@@ -1,5 +1,5 @@
 #!/bin/bash
-# Script para construir y cargar imágenes Docker en Minikube (cinco nodos)
+# Script para construir y cargar imágenes Docker en Minikube (un nodo)
 # Funciona en Linux y Mac
 # Uso: ./build-images.sh
 

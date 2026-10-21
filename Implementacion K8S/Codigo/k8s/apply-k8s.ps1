@@ -16,40 +16,32 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrEmpty($nodes)) {
     exit 1
 }
 
-Write-Host "`n1. Validando y etiquetando los nodos..." -ForegroundColor Yellow
-$requiredNodes = @("minikube", "minikube-m02", "minikube-m03", "minikube-m04", "minikube-m05")
-foreach ($node in $requiredNodes) {
-    kubectl get node $node *> $null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Error: No se encontró el nodo $node. Se requieren cinco nodos Kubernetes." -ForegroundColor Red
-        Write-Host "Agrega workers con: minikube node add --worker" -ForegroundColor Yellow
-        exit 1
-    }
-    kubectl wait --for=condition=Ready "node/$node" --timeout=120s *> $null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Error: El nodo $node no está Ready." -ForegroundColor Red
-        exit 1
-    }
+Write-Host "`n1. Validando y etiquetando el nodo..." -ForegroundColor Yellow
+# Despliegue de un solo nodo: todos los componentes corren en el nodo
+# `minikube`. El nodo se etiqueta workload=platform para anclar los
+# PersistentVolumes y los componentes de plataforma. Los microservicios
+# declaran afinidad blanda (preferred) hacia su label workload, por lo que
+# la separación es declarativa y no bloquea el scheduling en el único nodo.
+$node = "minikube"
+kubectl get node $node *> $null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Error: No se encontró el nodo $node. Ejecuta: minikube start --memory=6144 --cpus=4" -ForegroundColor Red
+    exit 1
+}
+kubectl wait --for=condition=Ready "node/$node" --timeout=120s *> $null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Error: El nodo $node no está Ready." -ForegroundColor Red
+    exit 1
 }
 
-# La etiqueta workload determina en qué nodo puede ejecutarse cada componente.
+# La etiqueta workload ancla la plataforma y los PVs al nodo único.
 kubectl label nodes minikube workload=platform --overwrite
-kubectl label nodes minikube-m02 workload=frontend --overwrite
-kubectl label nodes minikube-m03 workload=users --overwrite
-kubectl label nodes minikube-m04 workload=pharmacy --overwrite
-kubectl label nodes minikube-m05 workload=gateway --overwrite
 
 # Elimina la etiqueta anterior para evitar que manifiestos viejos permitan
 # programar componentes en cualquier nodo.
-foreach ($node in $requiredNodes) {
-    kubectl label nodes $node node-type- 2>$null | Out-Null
-}
+kubectl label nodes minikube node-type- 2>$null | Out-Null
 
-Write-Host "   platform: minikube" -ForegroundColor Cyan
-Write-Host "   frontend: minikube-m02" -ForegroundColor Cyan
-Write-Host "   users:    minikube-m03" -ForegroundColor Cyan
-Write-Host "   pharmacy: minikube-m04" -ForegroundColor Cyan
-Write-Host "   gateway:  minikube-m05" -ForegroundColor Cyan
+Write-Host "   platform: minikube (nodo único)" -ForegroundColor Cyan
 Write-Host "   Verificar: kubectl get nodes --show-labels" -ForegroundColor Gray
 
 Write-Host "`n2. Creando namespace..." -ForegroundColor Yellow
@@ -66,6 +58,7 @@ kubectl apply -f configmaps\otel-collector-config.yaml
 kubectl apply -f configmaps\grafana-provisioning.yaml
 kubectl apply -f configmaps\grafana-dashboards.yaml
 kubectl apply -f configmaps\grafana-dashboard-infra.yaml
+kubectl apply -f configmaps\grafana-alerting.yaml
 kubectl apply -f configmaps\fluent-bit-config.yaml
 if ($LASTEXITCODE -ne 0) { exit 1 }
 

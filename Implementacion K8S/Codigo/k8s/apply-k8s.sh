@@ -15,41 +15,31 @@ fi
 # Verificar que minikube está corriendo
 if ! minikube status &> /dev/null; then
     echo "Error: Minikube no está corriendo."
-    echo "Ejecuta: minikube start y agrega cuatro workers con minikube node add --worker"
+    echo "Ejecuta: minikube start --memory=6144 --cpus=4"
     exit 1
 fi
 
 echo ""
-echo "1. Validando y etiquetando los nodos del despliegue..."
-REQUIRED_NODES=(minikube minikube-m02 minikube-m03 minikube-m04 minikube-m05)
-
-for node in "${REQUIRED_NODES[@]}"; do
-  if ! kubectl get node "$node" >/dev/null 2>&1; then
-    echo "Error: No se encontró el nodo $node. Se requieren cinco nodos Kubernetes."
-    echo "Agrega workers con: minikube node add --worker"
+echo "1. Validando y etiquetando el nodo del despliegue..."
+# Despliegue de un solo nodo: todos los componentes corren en `minikube`.
+# El nodo se etiqueta workload=platform para anclar PVs y plataforma; los
+# microservicios declaran afinidad blanda (preferred) hacia su label workload,
+# por lo que la separación es declarativa y no bloquea el scheduling.
+node="minikube"
+if ! kubectl get node "$node" >/dev/null 2>&1; then
+    echo "Error: No se encontró el nodo $node. Ejecuta: minikube start --memory=6144 --cpus=4"
     exit 1
-  fi
-  kubectl wait --for=condition=Ready "node/$node" --timeout=120s >/dev/null
-done
+fi
+kubectl wait --for=condition=Ready "node/$node" --timeout=120s >/dev/null
 
-# La etiqueta workload determina en qué nodo puede ejecutarse cada componente.
+# La etiqueta workload ancla la plataforma y los PVs al nodo único.
 kubectl label nodes minikube workload=platform --overwrite
-kubectl label nodes minikube-m02 workload=frontend --overwrite
-kubectl label nodes minikube-m03 workload=users --overwrite
-kubectl label nodes minikube-m04 workload=pharmacy --overwrite
-kubectl label nodes minikube-m05 workload=gateway --overwrite
 
 # Elimina la etiqueta anterior para evitar que manifiestos viejos permitan
 # programar componentes en cualquier nodo.
-for node in "${REQUIRED_NODES[@]}"; do
-  kubectl label nodes "$node" node-type- >/dev/null 2>&1 || true
-done
+kubectl label nodes "$node" node-type- >/dev/null 2>&1 || true
 
-echo "   platform: minikube"
-echo "   frontend: minikube-m02"
-echo "   users:    minikube-m03"
-echo "   pharmacy: minikube-m04"
-echo "   gateway:  minikube-m05"
+echo "   platform: minikube (nodo único)"
 
 echo ""
 echo "2. Creando namespace..."
@@ -66,6 +56,7 @@ kubectl apply -f configmaps/otel-collector-config.yaml
 kubectl apply -f configmaps/grafana-provisioning.yaml
 kubectl apply -f configmaps/grafana-dashboards.yaml
 kubectl apply -f configmaps/grafana-dashboard-infra.yaml
+kubectl apply -f configmaps/grafana-alerting.yaml
 kubectl apply -f configmaps/fluent-bit-config.yaml
 
 echo ""

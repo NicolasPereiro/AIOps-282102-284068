@@ -1,4 +1,4 @@
-# Script para construir y cargar imágenes Docker en Minikube (cinco nodos)
+# Script para construir y cargar imágenes Docker en Minikube (un nodo)
 # Funciona en Windows PowerShell
 # Uso: .\build-images.ps1
 
