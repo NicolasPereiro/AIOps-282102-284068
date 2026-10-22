@@ -35,11 +35,13 @@ param(
     [string]$BaseUrl = "http://127.0.0.1:5000",
     [string]$UsersServiceUrl = "http://127.0.0.1:5001",
     [int]$TotalRequests = 200,
-    [int]$Concurrency = 10,
+    [int]$Concurrency = 20,
     [int]$SuccessPercent = 60,
     [int]$ClientErrorPercent = 20,
-    [int]$NormalDelayMs = 100,
-    [string]$OutputCsv = ""
+    [int]$NormalDelayMs = 0,
+    [string]$OutputCsv = "",
+    [switch]$IncludeRateLimitTest,
+    [int]$DurationSec = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -113,19 +115,27 @@ $rateLimitScenarios = @(
 )
 
 # ---------------------------------------------------------------------------
-# 3. Construir la cola con distribucion controlada
+# 3. Bucle de carga sostenida (si -DurationSec > 0) o ejecucion unica
 # ---------------------------------------------------------------------------
-$rateLimitPercent = 100 - $SuccessPercent - $ClientErrorPercent
+$allResults = New-Object System.Collections.ArrayList
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
+$iteration = 0
+
+do {
+    $iteration++
+    if ($DurationSec -gt 0) {
+        Write-Host "`n===== Iteracion $iteration (elapsed $([int]$sw.Elapsed.TotalSeconds)s / ${DurationSec}s) =====" -ForegroundColor Magenta
+    }
+
 $successCount = [int]($TotalRequests * $SuccessPercent / 100)
 $clientCount  = [int]($TotalRequests * $ClientErrorPercent / 100)
-$rateCount    = $TotalRequests - $successCount - $clientCount
 
-# El rate limit del gateway es 100 req/min por IP y por pod. Con 2 replicas
-# hay que superar 100 req/min en CADA pod, por eso el bloque 429 necesita
-# al menos 202 peticiones rapidas desde la misma IP.
-if ($rateCount -lt 202) {
-    Write-Host "Ajustando bloque 429 a 202 (minimo para disparar rate limit con 2 replicas)" -ForegroundColor Yellow
-    $rateCount = 202
+# Bloque de rate-limit (429) solo si se solicita explicitamente. Por defecto se
+# omite para que el trafico sea de alta carga con mayoria de respuestas 2xx/4xx.
+$rateCount = 0
+if ($IncludeRateLimitTest) {
+    $rateCount = [math]::Max(202, $TotalRequests - $successCount - $clientCount)
+    if ($rateCount -lt 202) { $rateCount = 202 }
 }
 
 $queue = New-Object System.Collections.ArrayList
@@ -135,6 +145,7 @@ for ($i = 0; $i -lt $successCount; $i++) {
     $item = $s.Clone()
     $item.DelayMs = $NormalDelayMs
     if (-not $item.Headers) { $item.Headers = @{} }
+    # IP rotativa para no disparar el rate limit por IP ni el throttling de fallas
     $item.Headers["X-Real-IP"] = "10.0.0.$(Get-Random -Minimum 1 -Maximum 254)"
     [void]$queue.Add($item)
 }
@@ -146,12 +157,15 @@ for ($i = 0; $i -lt $clientCount; $i++) {
     $item.Headers["X-Real-IP"] = "10.0.0.$(Get-Random -Minimum 1 -Maximum 254)"
     [void]$queue.Add($item)
 }
-for ($i = 0; $i -lt $rateCount; $i++) {
-    $s = $rateLimitScenarios | Get-Random
-    $item = $s.Clone()
-    $item.DelayMs = 0
-    # Sin X-Real-IP: todas desde la misma IP real del port-forward -> disparan 429
-    [void]$queue.Add($item)
+if ($IncludeRateLimitTest) {
+    for ($i = 0; $i -lt $rateCount; $i++) {
+        $s = $rateLimitScenarios | Get-Random
+        $item = $s.Clone()
+        $item.DelayMs = 0
+        # Una sola IP para disparar el rate limit (100 req/min por IP)
+        $item.Headers = @{ "X-Real-IP" = "10.99.99.99" }
+        [void]$queue.Add($item)
+    }
 }
 
 # Mezclar para no enviar todos los 429 juntos
@@ -159,11 +173,16 @@ $queue = $queue | Sort-Object { Get-Random }
 
 $totalReal = $successCount + $clientCount + $rateCount
 Write-Host "Cola generada: $totalReal peticiones" -ForegroundColor Yellow
-Write-Host "  200 (exitosas)     : $successCount" -ForegroundColor Green
-Write-Host "  4XX (cliente)      : $clientCount" -ForegroundColor Yellow
-Write-Host "  429 (rate limit)   : $rateCount" -ForegroundColor Yellow
+Write-Host "  200/4XX (mixtas)  : $($successCount + $clientCount)" -ForegroundColor Green
+if ($IncludeRateLimitTest) {
+    Write-Host "  429 (rate limit)   : $rateCount" -ForegroundColor Yellow
+}
 Write-Host ""
-Write-Host "Nota: el bloque 429 necesita >=202 req (2 replicas). Para una distribucion 60/20/20 real use -TotalRequests 1000 o superior." -ForegroundColor Gray
+if (-not $IncludeRateLimitTest) {
+    Write-Host "Nota: modo carga (sin bloque 429). Para probar rate limiting use -IncludeRateLimitTest." -ForegroundColor Gray
+} else {
+    Write-Host "Nota: el bloque 429 usa una sola IP (10.99.99.99) para disparar el rate limit." -ForegroundColor Gray
+}
 Write-Host ""
 # ---------------------------------------------------------------------------
 # 4. Scriptblock ejecutado en cada runspace
@@ -259,6 +278,19 @@ while ($asyncResults.Count -gt 0) {
 
 $pool.Close()
 $pool.Dispose()
+
+    # Acumular resultados de esta iteracion
+    foreach ($r in $results) { [void]$allResults.Add($r) }
+
+    if ($DurationSec -gt 0) {
+        $remaining = $DurationSec - $sw.Elapsed.TotalSeconds
+        if ($remaining -le 0) { break }
+        Write-Host "  Iteracion $iteration completada. Descanso 2s antes de la siguiente..." -ForegroundColor DarkGray
+        Start-Sleep -Seconds 2
+    }
+} while ($DurationSec -gt 0 -and $sw.Elapsed.TotalSeconds -lt $DurationSec)
+
+$results = $allResults
 
 # ---------------------------------------------------------------------------
 # 6. Resumen y exportacion
