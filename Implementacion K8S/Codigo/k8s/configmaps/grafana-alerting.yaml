@@ -62,7 +62,7 @@ data:
                   to: 0
                 datasourceUid: prometheus
                 model:
-                  expr: 'rate(pharmago_http_request_duration_milliseconds_sum[5m]) / rate(pharmago_http_request_duration_milliseconds_count[5m])'
+                  expr: '(rate(pharmago_http_request_duration_milliseconds_sum[5m]) > 0) / (rate(pharmago_http_request_duration_milliseconds_count[5m]) > 0)'
                   instant: true
                   refId: A
               - refId: C

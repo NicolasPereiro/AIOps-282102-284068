@@ -1,82 +1,87 @@
-# Bosquejo del diagrama de despliegue
+# Diagrama de Despliegue de la Plataforma
 
-El siguiente diagrama representa la distribución de la plataforma en Minikube,
-desplegada sobre un único nodo Kubernetes.
+Este documento describe la arquitectura de despliegue sobre Kubernetes (Minikube de nodo único), con los microservicios, la base de datos relacional y la infraestructura de observabilidad.
+
+## Imagen para Documentación (Tema Claro)
+
+Para incluir en el informe académico final (Word/PDF), se generaron dos formatos listos para usar en `Implementacion K8S/Documentación/img/`:
+- [diagrama-despliegue.png](file:///c:/ID/AIOps-282102-284068/Implementacion%20K8S/Documentacio%CC%81n/img/diagrama-despliegue.png) (PNG renderizado nítido con fondo claro)
+- [diagrama-despliegue.svg](file:///c:/ID/AIOps-282102-284068/Implementacion%20K8S/Documentacio%CC%81n/img/diagrama-despliegue.svg) (Gráfico vectorial escalable)
+
+---
+
+## Diagrama Mermaid (Tema Claro Simplificado)
 
 ```mermaid
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'primaryColor': '#EEF2F6',
+    'primaryTextColor': '#1E293B',
+    'primaryBorderColor': '#94A3B8',
+    'lineColor': '#334155',
+    'secondaryColor': '#FFFFFF',
+    'tertiaryColor': '#F8FAFC',
+    'fontSize': '12px'
+  }
+}}%%
 flowchart TB
-    browser[Usuario / navegador]
+    Client(["Cliente / Navegador Web"])
 
-    subgraph cluster[Cluster Kubernetes - Minikube]
-        subgraph node[Nodo único minikube - workload=platform]
-            db[(SQL Server)]
-            otel[OTEL Collector]
-            prometheus[Prometheus]
-            grafana[Grafana]
-            elastic[Elasticsearch]
-            kibana[Kibana]
-            ui[Frontend Angular + Nginx]
-            uiSvc[Service pharmago-ui]
-            users[Users Service]
-            usersSvc[Service pharmago-users-service]
-            pharmacy[Pharmacy Service]
-            pharmacySvc[Service pharmago-pharmacy-service]
-            gateway[API Gateway]
-            gatewaySvc[Service pharmago-api-gateway]
-            fluent[Fluent Bit]
-            nodeExporter[Node Exporter]
+    subgraph Cluster ["Cluster Kubernetes (Minikube) - Namespace: pharmago"]
+        subgraph Node ["Nodo: minikube (Label: workload=platform)"]
+
+            subgraph Apps ["Microservicios de Aplicacion (Afinidad Blanda: workload)"]
+                UI["<b>pharmago-ui</b><br/>pharmago-ui:latest<br/>(replicas: 2 | :80)"]
+                GW["<b>pharmago-api-gateway</b><br/>pharmago-api-gateway:latest<br/>(replicas: 2 | :80)"]
+                Users["<b>pharmago-users-service</b><br/>pharmago-users-service:latest<br/>(replicas: 2 | :80)"]
+                Pharm["<b>pharmago-pharmacy-service</b><br/>pharmago-pharmacy-service:latest<br/>(replicas: 2 | :80)"]
+            end
+
+            subgraph Data ["Base de Datos (Afinidad: workload=platform)"]
+                DB[("<b>pharmago-db</b><br/>mcr.microsoft.com/mssql/server:2019-latest<br/>(replicas: 1 | :1433)")]
+            end
+
+            subgraph Obs ["Stack de Observabilidad y Telemetria (workload=platform)"]
+                OTEL["<b>otel-collector</b><br/>otel/opentelemetry-collector-contrib:latest<br/>(:4317 / :8889)"]
+                Prom["<b>prometheus</b><br/>prom/prometheus:latest<br/>(:9090)"]
+                Graf["<b>grafana</b><br/>grafana/grafana:10.4.2<br/>(:3000)"]
+                ES["<b>elasticsearch</b><br/>docker.elastic.co/elasticsearch/elasticsearch:8.11.0<br/>(:9200)"]
+                Kib["<b>kibana</b><br/>docker.elastic.co/kibana/kibana:8.11.0<br/>(:5601)"]
+                FB["<b>fluent-bit (DaemonSet)</b><br/>fluent/fluent-bit:2.2.2"]
+                NodeExp["<b>node-exporter (DaemonSet)</b><br/>prom/node-exporter:v1.7.0<br/>(:9100)"]
+            end
+
         end
     end
 
-    browser --> uiSvc
-    browser -->|API por port-forward 127.0.0.1:5000| gatewaySvc
-    uiSvc --> ui
-    gatewaySvc --> gateway
-    gateway --> usersSvc
-    gateway --> pharmacySvc
-    usersSvc --> users
-    pharmacySvc --> pharmacy
-    users --> db
-    pharmacy --> db
+    %% Trafico de Usuario
+    Client -->|"HTTP :8080 (Port-Forward)"| UI
+    Client -->|"HTTP :5000 (Port-Forward API)"| GW
 
-    users -->|métricas OTLP| otel
-    pharmacy -->|métricas OTLP| otel
-    gateway -->|métricas Prometheus| prometheus
-    otel --> prometheus
-    prometheus --> grafana
-    fluent -->|logs JSON| elastic
-    elastic --> kibana
-    nodeExporter -->|métricas de nodos| prometheus
+    %% Enrutamiento Interno
+    GW -->|"HTTP"| Users
+    GW -->|"HTTP"| Pharm
+    Users -->|"SQL :1433"| DB
+    Pharm -->|"SQL :1433"| DB
+
+    %% Telemetria y Monitoreo
+    Apps -.->|"OTLP gRPC :4317 (Trazas/Metricas)"| OTEL
+    OTEL -.->|"Metricas :8889"| Prom
+    NodeExp -.->|"Metricas Host :9100"| Prom
+    Prom -.->|"Dashboards"| Graf
+    FB -.->|"Logs JSON CRI"| ES
+    ES -.->|"Indices"| Kib
 ```
 
-## Evidencia esperada
+---
 
-```text
-Todos los componentes              -> minikube (nodo único, workload=platform)
+## Distribución y Afinidad de Cargas
 
-Plataforma (required → platform):
-  pharmago-db                      -> minikube
-  elasticsearch/prometheus/grafana -> minikube
-  otel-collector / kibana          -> minikube
-
-Microservicios (afinidad blanda/preferred por label workload):
-  pharmago-ui                  -> workload=frontend (declarativa)
-  pharmago-users-service       -> workload=users (declarativa)
-  pharmago-pharmacy-service    -> workload=pharmacy (declarativa)
-  pharmago-api-gateway         -> workload=gateway (declarativa)
-
-DaemonSets:
-  fluent-bit / node-exporter   -> una instancia en el nodo
-```
-
-La separación de los microservicios por label `workload` es **declarativa**
-(afinidad blanda, `preferredDuringSchedulingIgnoredDuringExecution`): en este
-entorno de un solo nodo todos los pods comparten el nodo físico, pero los
-manifiestos expresan el aislamiento por label. En un entorno productivo
-multi-nodo, esa afinidad se elevaría a `required
-DuringSchedulingIgnoredDuringExecution` para que cada microservicio corra en un
-nodo físico distinto.
-
-El frontend es una aplicación estática: las llamadas HTTP al API se originan en
-el navegador. Por eso el frontend y el API Gateway no requieren comunicación
-directa entre el contenedor Nginx y el Gateway.
+- **Nodo de Plataforma (`workload=platform`)**:
+  - `minikube` actúa como nodo único donde residen los PersistentVolumes y componentes de plataforma (`pharmago-db`, `elasticsearch`, `prometheus`, `grafana`, `otel-collector`, `kibana`).
+- **Microservicios**:
+  - Cada microservicio corre en pods independientes con 2 réplicas (`replicas: 2`).
+  - Afinidad declarativa blanda (`preferredDuringScheduling...`) por label `workload` (`frontend`, `gateway`, `users`, `pharmacy`), preparada para elevarse a `required` en entornos multi-nodo.
+- **DaemonSets**:
+  - `fluent-bit` y `node-exporter` ejecutan una instancia por nodo para recolección de logs a nivel de contenedor y métricas a nivel de sistema operativo/nodo.
