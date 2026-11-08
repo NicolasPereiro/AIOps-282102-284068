@@ -155,13 +155,60 @@ kubectl apply -f deployments\frontend\ui-deployment.yaml
 
 if ($LASTEXITCODE -ne 0) { exit 1 }
 
+Write-Host "`n10. Inicializando base de datos con datos de prueba (seed-data.sql)..." -ForegroundColor Yellow
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+if (-not $scriptDir) { $scriptDir = (Get-Location).Path }
+$seedFile = Join-Path (Split-Path $scriptDir -Parent) "Backend\seed-data.sql"
+if (Test-Path $seedFile) {
+    Write-Host "   Esperando a que users-service complete migraciones de base de datos..." -ForegroundColor Cyan
+    $null = kubectl wait --for=condition=Ready pod -l app=pharmago-users-service -n pharmago --timeout=120s 2>&1
+    Start-Sleep -Seconds 2
+    $dbPod = ([string](kubectl get pod -n pharmago -l app=pharmago-db -o jsonpath='{.items[0].metadata.name}' 2>$null)).Trim()
+    if ($dbPod) {
+        Get-Content $seedFile -Raw | kubectl exec -i -n pharmago $dbPod -- /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "Str0ngP@ssword!" -C -d PharmaDb -i /dev/stdin 2>&1 | Out-Null
+        Write-Host "   Datos iniciales cargados en la base de datos (admin, empleado01, owner001, etc.)" -ForegroundColor Green
+    }
+}
+
+Write-Host "`n11. Configurando Dashboards y Data Views en Kibana..." -ForegroundColor Yellow
+$kibanaFile = Join-Path $scriptDir "kibana-dashboards.ndjson"
+if (Test-Path $kibanaFile) {
+    Write-Host "   Esperando a que Kibana esté listo..." -ForegroundColor Cyan
+    $null = kubectl wait --for=condition=Ready pod -l app=kibana -n pharmago --timeout=120s 2>&1
+    $kibanaPod = ([string](kubectl get pod -n pharmago -l app=kibana -o jsonpath='{.items[0].metadata.name}' 2>$null)).Trim()
+    if ($kibanaPod) {
+        $importRes = Get-Content $kibanaFile -Raw | kubectl exec -i -n pharmago $kibanaPod -- sh -c "cat > /tmp/import.ndjson && curl -s -X POST 'http://localhost:5601/api/saved_objects/_import?overwrite=true' -H 'kbn-xsrf:true' -F 'file=@/tmp/import.ndjson'" 2>&1
+        if ($importRes -like "*`"success`":true*") {
+            Write-Host "   Dashboards y Data Views de Kibana importados correctamente." -ForegroundColor Green
+        } else {
+            Write-Host "   Aviso al importar en Kibana: $importRes" -ForegroundColor Yellow
+        }
+    }
+}
+
 Write-Host "`n=== Despliegue completado ===" -ForegroundColor Green
 Write-Host "`nVerificando estado de los pods..." -ForegroundColor Yellow
 kubectl get pods -n pharmago -o wide
 
-Write-Host "`nPara ver los servicios expuestos:" -ForegroundColor Cyan
-Write-Host "  Frontend:     minikube service pharmago-ui -n pharmago --url" -ForegroundColor White
-Write-Host "  Grafana:      minikube service grafana -n pharmago --url" -ForegroundColor White
-Write-Host "  Kibana:       minikube service kibana -n pharmago --url" -ForegroundColor White
-Write-Host "  Prometheus:   minikube service prometheus -n pharmago --url" -ForegroundColor White
+Write-Host "`n=== Dashboards y Accesos Disponibles ===" -ForegroundColor Green
+Write-Host ""
+Write-Host "Aplicación y Gateway (via port-forward):" -ForegroundColor White
+Write-Host "  - Frontend:                   http://127.0.0.1:4200" -ForegroundColor Cyan
+Write-Host "  - API Gateway:                http://127.0.0.1:5000" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Dashboards de Grafana (Métricas y Rendimiento):" -ForegroundColor White
+Write-Host "  - PharmaGo Overview:          http://127.0.0.1:3000/d/pharmago-overview" -ForegroundColor Cyan
+Write-Host "  - Infraestructura Kubernetes: http://127.0.0.1:3000/d/pharmago-infra" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Dashboards de Kibana (Logs y Trazabilidad):" -ForegroundColor White
+Write-Host "  - PharmaGo - Logs:            http://127.0.0.1:5601/app/dashboards#/view/4fc85f40-cbca-11f1-a044-d7e76d4ac73e" -ForegroundColor Cyan
+Write-Host "  - Stream de Logs en Vivo:     http://127.0.0.1:5601/app/discover#/?_a=(discover:(columns:!('@timestamp',kubernetes.container_name,LogLevel,Message,'Scopes.correlation_id'),sort:!(!('@timestamp',desc))))" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Prometheus & Base de Datos:" -ForegroundColor White
+Write-Host "  - Prometheus Targets:         http://127.0.0.1:9090" -ForegroundColor Cyan
+Write-Host "  - SQL Server:                 127.0.0.1,11433 (sa / Str0ngP@ssword!)" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Nota: Si los puertos locales no están activos, inicia los túneles con:" -ForegroundColor Gray
+Write-Host "      .\port-forward.ps1" -ForegroundColor Gray
+Write-Host ""
 

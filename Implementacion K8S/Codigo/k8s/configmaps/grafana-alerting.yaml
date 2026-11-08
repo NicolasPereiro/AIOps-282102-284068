@@ -22,7 +22,7 @@ data:
                   to: 0
                 datasourceUid: prometheus
                 model:
-                  expr: 'sum(rate(pharmago_http_errors_total[5m])) / sum(rate(pharmago_http_requests_total[5m])) * 100'
+                  expr: '(sum(rate(pharmago_http_requests_total_1{job="api-gateway",status_code=~"[45]..",endpoint!~"/health|/metrics"}[1m])) / sum(rate(pharmago_http_requests_total_1{job="api-gateway",endpoint!~"/health|/metrics"}[1m])) * 100) or on() vector(0)'
                   instant: true
                   refId: A
               - refId: C
@@ -62,7 +62,7 @@ data:
                   to: 0
                 datasourceUid: prometheus
                 model:
-                  expr: '(rate(pharmago_http_request_duration_milliseconds_sum[5m]) > 0) / (rate(pharmago_http_request_duration_milliseconds_count[5m]) > 0)'
+                  expr: 'sum(rate(pharmago_http_request_duration_milliseconds_ms_sum{job="api-gateway",endpoint!~"/health|/metrics"}[1m])) / sum(rate(pharmago_http_request_duration_milliseconds_ms_count{job="api-gateway",endpoint!~"/health|/metrics"}[1m]))'
                   instant: true
                   refId: A
               - refId: C
@@ -102,7 +102,7 @@ data:
                   to: 0
                 datasourceUid: prometheus
                 model:
-                  expr: 'sum(rate(pharmago_http_requests_total{status_code="429"}[1m]))'
+                  expr: 'sum(rate(pharmago_http_requests_total_1{job="api-gateway",status_code="429"}[1m])) or on() vector(0)'
                   instant: true
                   refId: A
               - refId: C

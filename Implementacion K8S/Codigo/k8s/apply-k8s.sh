@@ -147,18 +147,63 @@ kubectl apply -f services/frontend/ui-service.yaml
 kubectl apply -f deployments/frontend/ui-deployment.yaml
 
 echo ""
+echo "10. Inicializando base de datos con datos de prueba (seed-data.sql)..."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SEED_FILE="${SCRIPT_DIR}/../Backend/seed-data.sql"
+if [ -f "$SEED_FILE" ]; then
+    echo "   Esperando a que users-service complete migraciones de base de datos..."
+    kubectl wait --for=condition=Ready pod -l app=pharmago-users-service -n pharmago --timeout=120s >/dev/null 2>&1 || true
+    sleep 2
+    DB_POD=$(kubectl get pod -n pharmago -l app=pharmago-db -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    if [ -n "$DB_POD" ]; then
+        kubectl exec -i -n pharmago "$DB_POD" -- /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "Str0ngP@ssword!" -C -d PharmaDb -i /dev/stdin >/dev/null 2>&1 || true
+        echo "   Datos iniciales cargados en la base de datos (admin, empleado01, owner001, etc.)"
+    fi
+fi
+
+echo ""
+echo "11. Configurando Dashboards y Data Views en Kibana..."
+KIBANA_FILE="${SCRIPT_DIR}/kibana-dashboards.ndjson"
+if [ -f "$KIBANA_FILE" ]; then
+    echo "   Esperando a que Kibana este listo..."
+    kubectl wait --for=condition=Ready pod -l app=kibana -n pharmago --timeout=120s >/dev/null 2>&1 || true
+    KIBANA_POD=$(kubectl get pod -n pharmago -l app=kibana -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    if [ -n "$KIBANA_POD" ]; then
+        IMPORT_RES=$(cat "$KIBANA_FILE" | kubectl exec -i -n pharmago "$KIBANA_POD" -- sh -c "cat > /tmp/import.ndjson && curl -s -X POST 'http://localhost:5601/api/saved_objects/_import?overwrite=true' -H 'kbn-xsrf:true' -F 'file=@/tmp/import.ndjson'" 2>&1)
+        if [[ "$IMPORT_RES" == *"\"success\":true"* ]]; then
+            echo "   Dashboards y Data Views de Kibana importados correctamente."
+        else
+            echo "   Aviso al importar en Kibana: $IMPORT_RES"
+        fi
+    fi
+fi
+
+echo ""
 echo "=== Despliegue completado ==="
 echo ""
 echo "Verificando estado de los pods..."
 kubectl get pods -n pharmago -o wide
 
 echo ""
-echo "Para acceder a los servicios (usa 127.0.0.1 en Windows):"
-echo "  ./port-forward.sh"
+echo "=== Dashboards y Accesos Disponibles ==="
 echo ""
-echo "O con minikube service:"
-echo "  Frontend:     minikube service pharmago-ui -n pharmago --url"
-echo "  Grafana:      minikube service grafana -n pharmago --url"
-echo "  Kibana:       minikube service kibana -n pharmago --url"
-echo "  Prometheus:   minikube service prometheus -n pharmago --url"
+echo "Aplicación y Gateway (via port-forward):"
+echo "  - Frontend:                   http://127.0.0.1:4200"
+echo "  - API Gateway:                http://127.0.0.1:5000"
+echo ""
+echo "Dashboards de Grafana (Metricas y Rendimiento):"
+echo "  - PharmaGo Overview:          http://127.0.0.1:3000/d/pharmago-overview"
+echo "  - Infraestructura Kubernetes: http://127.0.0.1:3000/d/pharmago-infra"
+echo ""
+echo "Dashboards de Kibana (Logs y Trazabilidad):"
+echo "  - PharmaGo - Logs:            http://127.0.0.1:5601/app/dashboards#/view/4fc85f40-cbca-11f1-a044-d7e76d4ac73e"
+echo "  - Stream de Logs en Vivo:     http://127.0.0.1:5601/app/discover"
+echo ""
+echo "Prometheus & Base de Datos:"
+echo "  - Prometheus Targets:         http://127.0.0.1:9090"
+echo "  - SQL Server:                 127.0.0.1,11433 (sa / Str0ngP@ssword!)"
+echo ""
+echo "Nota: Si los puertos locales no estan activos, inicia los tuneles con:"
+echo "      ./port-forward.sh"
+echo ""
 

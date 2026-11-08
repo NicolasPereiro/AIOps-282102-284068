@@ -1,17 +1,17 @@
 # Chaos Engineering — PharmaGo
 
 Escenarios de caos para validar detección, contención y recuperación. El punto de
-entrada es **`chaos-ha.ps1`**: un único script autocontenido que orquesta los
-6 escenarios de la rúbrica e incluye el generador de tráfico y los helpers de
-kubectl/Prometheus. Deja evidencia en `reports/`.
+entrada es **`chaos.ps1`**: un único script autocontenido que genera tráfico constante
+de 20 req/s simulando 20 usuarios (90% respuestas 200 OK y 10% errores 4xx) mientras
+dispara eventos de caos aleatorios en paralelo, con auto-reconexión de port-forward y
+monitoreo segundo a segundo en vivo por terminal.
 
 ```text
 chaos-engineering/
-├── chaos-ha.ps1                     ← ÚNICO script de caos (6 escenarios, autocontenido)
-├── chaos-cleanup.ps1                ← Limpieza/restauración de emergencia (Recover)
-├── PLAN-CONTENCION-INCIDENTES.md    ← Plan operativo (Prepare/Detect/Respond/Recover/Learn)
-├── README.md
-└── reports/                         ← Evidencia generada por cada corrida (ignorada por git)
+├── chaos.ps1                     ← Script principal de caos (20 req/s 90/10 + 11 eventos aleatorios)
+├── chaos-cleanup.ps1             ← Limpieza/restauración de emergencia (Recover)
+├── PLAN-CONTENCION-INCIDENTES.md ← Plan operativo (Prepare/Detect/Respond/Recover/Learn)
+└── README.md
 ```
 
 El plan operativo completo (Prepare, Detect, Respond, Recover y Learn) está en
@@ -27,37 +27,28 @@ canónica del plan y vive dentro de la carpeta de código.
    kubectl label node minikube workload=platform --overwrite
    ```
 
-2. Port-forwards activos (en terminales separadas):
+2. Despliegue de la aplicación aplicado (la base de datos se inicializa automáticamente con `seed-data.sql` en el paso 10):
 
-   ```bash
-   kubectl port-forward -n pharmago svc/pharmago-api-gateway 5000:80
-   kubectl port-forward -n pharmago svc/prometheus 9090:9090
+   ```powershell
+   cd ..\k8s
+   .\apply-k8s.ps1
    ```
 
-   El primero es obligatorio para `request` y para las verificaciones HTTP.
-   El segundo es opcional: sin Prometheus el script sigue funcionando, pero
-   algunos escenarios quedan sin métrica y se apoyan en `kubectl`.
-
-3. Base de datos inicializada con `Backend/seed-data.sql` para que existan
-   `admin`, `empleado01` y `owner001` (contraseña `Abcdef12.`).
-
-4. PowerShell 7+ recomendado (`pwsh`). También funciona Windows PowerShell 5.1.
+3. PowerShell 7+ o Windows PowerShell 5.1.
 
 ## Uso rápido
 
+El script está 100% preconfigurado y no requiere parámetros ni decoradores de entrada:
+
 ```powershell
-# Simular sin tocar el cluster
-.\chaos-ha.ps1 -Scenario all -DryRun
-
-# Todos los escenarios (pide confirmación)
-.\chaos-ha.ps1 -Scenario all
-
-# Sin confirmación (CI / demo)
-.\chaos-ha.ps1 -Scenario all -Force
-
-# Un escenario puntual (alta intensidad, pico visible)
-.\chaos-ha.ps1 -Scenario cpu -Target pharmago-api-gateway -Intensity high -DurationSec 90 -Force
+cd "Implementacion K8S\Codigo\chaos-engineering"
+.\chaos.ps1
 ```
+
+Durante la ejecución verás en la terminal:
+- Ticker en tiempo real segundo a segundo con el estado del tráfico (req/s, 2xx, 4xx, 5xx, 429, latencias p95 y acumulados).
+- Banners destacados con el inicio y fin de cada evento de caos.
+- Al presionar `Ctrl+C` se ejecuta una limpieza automática que restaura réplicas en 2, reasocia el servicio de la base de datos y limpia archivos temporales de disco.
 
 Salida esperada:
 
