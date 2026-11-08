@@ -90,16 +90,16 @@ Todos los microservicios sin estado (`pharmago-ui`, `pharmago-users-service`, `p
 
 ### Procedimiento de Validación de Disponibilidad
 Para comprobar que durante una actualización no se pierde una sola petición:
-1. Iniciar un flujo continuo de tráfico con el generador integrado en `chaos-ha.ps1`:
+1. Iniciar un flujo continuo de tráfico con el motor integrado en `chaos.ps1`:
    ```powershell
-   .\chaos-ha.ps1 -Scenario request -LoadTotalRequests 200 -LoadConcurrency 5 -LoadNormalDelayMs 100 -SkipRateLimitTest -Force
+   $env:CHAOS_DURATION_SEC = "300"; .\chaos.ps1
    ```
 2. Provocar el reemplazo de componentes (rollout):
    ```bash
    kubectl rollout restart deployment pharmago-users-service -n pharmago
    kubectl rollout status deployment pharmago-users-service -n pharmago
    ```
-3. Verificar en `chaos-engineering/reports/<timestamp>/request/http/requests.csv` que el 100% de las respuestas son exitosas (cero errores HTTP 502/503/504 por caída de pods).
+3. Verificar en `chaos-engineering/reports/<timestamp>/traffic.csv` que durante el rollout la tasa se mantiene en 20 req/s y que el 100% de las respuestas siguen exitosas (cero errores HTTP 502/503/504 por caída de pods).
 
 ---
 
@@ -129,31 +129,36 @@ Para comprobar que durante una actualización no se pierde una sola petición:
   - Montado en el deployment de Grafana bajo `/etc/grafana/provisioning/alerting/`.
   - Validación integrada en `setup-dashboards.ps1` (consulta `api/v1/provisioning/alert-rules`).
 
-- **Generador de tráfico mixto (integrado en `chaos-ha.ps1`)**:
-  - Ubicación: función `Invoke-TrafficLoad` dentro de `Implementacion K8S/Codigo/chaos-engineering/chaos-ha.ps1` (script autocontenido: no depende de archivos externos).
-  - Genera peticiones HTTP mixtas (códigos 200 y 4XX: 400, 401, 404 y 429) contra los servicios de Users y Pharmacy a través del API Gateway (`http://127.0.0.1:5000`).
-  - Obtiene tokens de sesión con las credenciales sembradas (`admin`, `empleado01`,
-  `owner001`, contraseña `Abcdef12.`) para ejercitar endpoints protegidos y generar
-  401 en accesos sin token.
-  - Ejecuta con un pool de runspaces configurable (`-LoadConcurrency`) y exporta el detalle de cada petición a `reports/<timestamp>/request/http/requests.csv`, incluyendo resumen por código de estado y por endpoint.
-   - Parámetros principales: `-LoadTotalRequests`, `-LoadConcurrency`, `-LoadNormalDelayMs`, `-LoadDurationSec`, `-BaseUrl`, `-UsersServiceUrl`, `-SkipRateLimitTest`.
-   - **Modo carga sostenida (~5 min, >=20 req/s, mayoría sin 429)**:
-     ```powershell
-     .\chaos-ha.ps1 -Scenario request -LoadTotalRequests 300 -LoadConcurrency 20 -LoadDurationSec 300 -SkipRateLimitTest -Force
-     ```
-     IP rotativa en todas las requests (10.0.0.x) para evitar rate limit por IP y throttling de fallas. Sin bloque 429.
-   - **Modo con test de rate limiting (incluye bloque 429, criterio de la rúbrica)**:
-     ```powershell
-     .\chaos-ha.ps1 -Scenario request -LoadTotalRequests 300 -LoadConcurrency 20 -LoadDurationSec 300 -Force
-     ```
-     Agrega 202 requests desde una sola IP (10.99.99.99) para disparar el rate limiter y el FailedRequestsThrottlingMiddleware.
-   - Requiere port-forward activo. El modo con rate-limit test consume el rate limit: esperar ~60 s entre corridas.
+- **Generador de tráfico y motor de caos (`chaos.ps1`)**:
+  - Ubicación: `Implementacion K8S/Codigo/chaos-engineering/chaos.ps1` — único
+    script de caos, ejecución directa (`.\chaos.ps1`), sin parámetros.
+  - Tráfico constante de **20 req/s exactas**: 20 usuarios virtuales con IP
+    rotativa (`10.100.x.y`) sobre un runspace pool; por segundo se envían 18
+    peticiones válidas + 2 inyectoras de error (400/401/404) contra Users y
+    Pharmacy a través del API Gateway (`http://127.0.0.1:5000`).
+  - Tokens de sesión con las credenciales sembradas (`admin`, `empleado01`,
+    `owner001`, contraseña `Abcdef12.`) para ejercitar endpoints protegidos y
+    generar 401 en accesos sin token.
+  - Consola en vivo (tasa, 2xx/4xx/5xx/429, latencia media y p95) y evidencia
+    persistente en `reports/<timestamp>/`: `traffic.csv` (una fila por segundo)
+    y `summary.md` (totales + eventos ejecutados).
+  - **Test de rate limiting (criterio de la rúbrica)**: evento `RateLimitBurst`
+    dispara 120 requests desde una sola IP (`10.99.99.99`) para saturar el
+    límite de 100 req/min y activar el `FailedRequestsThrottlingMiddleware`
+    → ola de 429 con header `Retry-After`. El rate limit es por IP: esperar
+    ~60 s entre corridas con ese bloque.
+  - Port-forward automático al gateway (levanta el forward si no está activo).
+  - `Ctrl+C` corta la sesión y el `finally` restaura el cluster (réplicas de
+    deployments, selector del Service de la DB, archivos `/tmp` en pods).
+  - Para corridas automatizadas acotadas: `$env:CHAOS_DURATION_SEC = "420"`
+    corta el motor a los 420 s en forma ordenada; sin la variable corre
+    indefinido hasta `Ctrl+C`.
 
 ---
 
 ## 5. Tareas Pendientes
 
-- [x] **Script de Ingeniería del Caos para Alta Disponibilidad**: Consolidado en `chaos-ha.ps1` (`Implementacion K8S/Codigo/chaos-engineering/`), único script de caos autocontenido. Valida la auto-curación de pods con el escenario `disconnect -DisconnectMode scale` (apagado de réplicas + verificación de que Kubernetes recupera réplicas READY dentro del timeout, con restauración automática) y la activación del patrón de mitigación ante solicitudes fallidas con el escenario `request` (envío de requests inválidas y verificación de HTTP 429 con header `Retry-After`).
+- [x] **Script de Ingeniería del Caos para Alta Disponibilidad**: `chaos.ps1` (`Implementacion K8S/Codigo/chaos-engineering/`) — game day con tráfico constante de 20 req/s y eventos de caos aleatorios que validan la auto-curación de pods (caídas forzadas), el patrón de mitigación ante solicitudes fallidas (ola de 429 con `Retry-After`, mezcla con requests inválidas), la desconexión de componentes internos (aislamiento del Service de la DB y scale-zero) y la interrupción de tráfico de red (`tc netem loss`). Ctrl+C (o `CHAOS_DURATION_SEC`) restaura el cluster automáticamente y deja la evidencia en `reports/<timestamp>/`.
 
 ---
 
@@ -219,35 +224,49 @@ El plan sigue la estructura de cinco fases del Incident Management Lifecycle:
 Es la única copia del plan: se eliminaron las copias de `docs/` y el contenido
 que no formaba parte de esta estructura.
 
-### 6.3 Caos orquestado (6 escenarios + Game Day)
+### 6.3 Caos orquestado (Game Day con tráfico constante)
 
-Punto de entrada: `Implementacion K8S/Codigo/chaos-engineering/chaos-ha.ps1` (script único y autocontenido).
+Punto de entrada: `Implementacion K8S/Codigo/chaos-engineering/chaos.ps1`
+(ejecución directa `.\chaos.ps1`; Ctrl+C o `$env:CHAOS_DURATION_SEC` corta con
+restauración automática).
 
-| Escenario | Cómo se inyecta | Verificación |
-|---|---|---|
-| `request` | Generador de tráfico integrado (`Invoke-TrafficLoad`) con 4xx y rate-limit test | `429 > 0`, `5xx = 0`, header `Retry-After` |
-| `cpu` | Bucles de CPU en todos los pods | CPU ≥ 0.25 cores |
-| `memory` | Asignación de MB por réplica | Memoria/OOM |
-| `storage` | `dd` en `/tmp` por réplica | `df` crece |
-| `network` | `tc netem loss 100%` en todos los pods del deployment o NetworkPolicy | `up=0` o 5xx |
-| `disconnect` | `scale --replicas=0` o parcheo de Service | endpoints vacíos y recuperación |
-| `gametime` | Game Day: trafico **constante de 20 req/s** (pacer interno) + eventos de caos aleatorios (cpu, memoria OOM, kill de pod, scale-zero, apagón de red, latencia +2 s, aislamiento de la DB, llenado de disco y ráfaga de 429) | Constancia ≥ 90 %, eventos ≥ `GameTimeSec/60`, impacto visible y recuperación final |
+Engine: **20 req/s constantes** (18 peticiones válidas + 2 inyectoras de error
+por segundo, 20 usuarios virtuales con IP rotativa) + **un evento de caos
+aleatorio cada 20-25 s**. Evidencia: consola en vivo y `reports/<timestamp>/`
+(`traffic.csv` por segundo + `summary.md` con totales y eventos ejecutados).
 
-Cada corrida genera `reports/<timestamp>/<escenario>/` con snapshots de Prometheus
-y kubectl (baseline, impacto y **pico a mitad del estrés**: CPU OOMKill, `df`
-con el disco lleno, etc.), CSV HTTP y un `summary.md` consolidado. Los
-escenarios de cpu, memory y storage estresan **todas las réplicas** del
-deployment en paralelo; `high` garantiza OOMKill (512 MB por pod contra límite
-de 384Mi) y escribe 1 GB por réplica en `/tmp`.
-Limpieza: `chaos-cleanup.ps1` (qdiscs, NetworkPolicies, `/tmp/chaos_fill`, réplicas).
+| Inyección de la rúbrica | Evento de caos |
+|---|---|
+| Inyección de requests | Mezcla del tráfico (10% inválidas: 400/401/404) + `RateLimitBurst` (ráfaga desde una IP única → 429 con `Retry-After`) |
+| Sobrecarga de CPU | `CpuSpike` — busy-loops 20 s en todos los pods de users-service |
+| Sobrecarga de memoria | `LowMemory` — 300 MB en pods de pharmacy (límite 384Mi → uso > 85%) |
+| Sobrecarga de storage | `DiskFill` — archivo de 500 MB en `/tmp` del gateway |
+| Interrupción de tráfico de red | `NetemBlackout` — `tc netem loss 100%` 15 s vía contenedor efímero `chaos-net`; el ReplicaSet recrea los pods con red limpia |
+| Desconexión de componentes internos | `DbDisconnect` (Service de SQL aislado) y `ScaleZeroBlackout` (pharmacy a 0 réplicas) |
+| Extras del Game Day | `KillPod*` de los 3 microservicios, `LatencySpike` (lock transaccional en SQL) y `DbHeavyQueries` |
+
+Los efectos se observan en la consola y en `traffic.csv`: caída de disponibilidad
+durante `DbDisconnect`/`LatencySpike` (5xx en endpoints con BD), `netErr`/p95
+elevado durante `NetemBlackout`, ola de 429 en los bursts y auto-curación de los
+pods eliminados en segundos. Limpieza de emergencia: `chaos-cleanup.ps1`.
 
 ### 6.4 Validación realizada
 
 - Notebook docente ejecutada de punta a punta con Docker/nbconvert; incluye los
   `TODO` resueltos, IsolationForest (sección 6) y One-Class SVM RBF (sección 7),
-  comparación y gráficos, conservando las preguntas de cierre.
-- `chaos-ha.ps1 -Scenario all -Force`: 6/6 escenarios PASS; evidencia en
-  `chaos-engineering/reports/20261107-191830/summary.md`.
+  comparación y gráficos, conservando las preguntas de cierre. La sección 9
+  (preguntas y exit ticket) quedó respondida dentro de la propia notebook,
+  citando las tablas y gráficos ejecutados.
+- `chaos.ps1` (Game Day de caos, corrida de validación de ~7 min con
+  `CHAOS_DURATION_SEC=420`): **6.460 requests a 20 req/s constantes** (tasa
+  20/s estable en `traffic.csv`), 3.109 × 2xx, 2.971 × 4xx, 363 × 5xx,
+  **2.019 × 429** y 17 errores de red; 9 eventos de caos ejecutados con impacto
+  visible en vivo (`RateLimitBurst` ×2, `CpuSpike`, `KillPodGateway` con
+  port-forward automático, `NetemBlackout` con p95 hasta 8 s, `LowMemory`,
+  `KillPodUsers`, `DbDisconnect` ×2) y restauración limpia del cluster al
+  finalizar (cleanup PASS). Evidencia:
+  `chaos-engineering/reports/20261108-132640/` (`summary.md` + `traffic.csv`
+  por segundo).
 - Suite ejecutada con Minikube, `metrics-server` habilitado y datos de
   `Backend/seed-data.sql` aplicados para que login y endpoints protegidos respondan.
 

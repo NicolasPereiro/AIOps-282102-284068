@@ -61,5 +61,5 @@ docker-compose.override.yml
 # === Extra ===
 docs/
 
-# === Chaos Eng Reports ===
+# === Entrega 3: reportes de corridas de caos de chaos.ps1 (no versionar) ===
 Implementacion K8S/Codigo/chaos-engineering/reports/
