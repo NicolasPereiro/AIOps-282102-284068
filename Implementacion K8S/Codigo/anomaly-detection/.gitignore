@@ -1,0 +1,5 @@
+# Ignorar salidas generadas por Jupyter/pytest
+.pytest_cache/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
