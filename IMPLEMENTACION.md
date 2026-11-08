@@ -90,16 +90,16 @@ Todos los microservicios sin estado (`pharmago-ui`, `pharmago-users-service`, `p
 
 ### Procedimiento de Validación de Disponibilidad
 Para comprobar que durante una actualización no se pierde una sola petición:
-1. Iniciar un flujo continuo de tráfico con el generador:
+1. Iniciar un flujo continuo de tráfico con el generador integrado en `chaos-ha.ps1`:
    ```powershell
-   .\traffic-generator.ps1 -TotalRequests 200 -Concurrency 5 -DelayMs 100
+   .\chaos-ha.ps1 -Scenario request -LoadTotalRequests 200 -LoadConcurrency 5 -LoadNormalDelayMs 100 -SkipRateLimitTest -Force
    ```
 2. Provocar el reemplazo de componentes (rollout):
    ```bash
    kubectl rollout restart deployment pharmago-users-service -n pharmago
    kubectl rollout status deployment pharmago-users-service -n pharmago
    ```
-3. Verificar en `traffic-results.csv` que el 100% de las respuestas son exitosas (cero errores HTTP 502/503/504 por caída de pods).
+3. Verificar en `chaos-engineering/reports/<timestamp>/request/http/requests.csv` que el 100% de las respuestas son exitosas (cero errores HTTP 502/503/504 por caída de pods).
 
 ---
 
@@ -129,26 +129,162 @@ Para comprobar que durante una actualización no se pierde una sola petición:
   - Montado en el deployment de Grafana bajo `/etc/grafana/provisioning/alerting/`.
   - Validación integrada en `setup-dashboards.ps1` (consulta `api/v1/provisioning/alert-rules`).
 
-- **Script de tráfico mixto (`traffic-generator.ps1`)**:
-  - Ubicación: `Implementacion K8S/Codigo/chaos-engineering/traffic-generator.ps1`.
+- **Generador de tráfico mixto (integrado en `chaos-ha.ps1`)**:
+  - Ubicación: función `Invoke-TrafficLoad` dentro de `Implementacion K8S/Codigo/chaos-engineering/chaos-ha.ps1` (script autocontenido: no depende de archivos externos).
   - Genera peticiones HTTP mixtas (códigos 200 y 4XX: 400, 401, 404 y 429) contra los servicios de Users y Pharmacy a través del API Gateway (`http://127.0.0.1:5000`).
-  - Obtiene tokens de sesión con las credenciales sembradas (`admin`, `empleado`, `duenio`) para ejercitar endpoints protegidos y generar 401 en accesos sin token.
-  - Ejecuta con un pool de runspaces configurable (`-Concurrency`) y exporta el detalle de cada petición a `traffic-results.csv`, incluyendo resumen por código de estado y por endpoint.
-   - Parámetros principales: `-TotalRequests`, `-Concurrency`, `-DelayMs`, `-BaseUrl`, `-UsersServiceUrl`, `-OutputCsv`, `-DurationSec`, `-IncludeRateLimitTest`.
+  - Obtiene tokens de sesión con las credenciales sembradas (`admin`, `empleado01`,
+  `owner001`, contraseña `Abcdef12.`) para ejercitar endpoints protegidos y generar
+  401 en accesos sin token.
+  - Ejecuta con un pool de runspaces configurable (`-LoadConcurrency`) y exporta el detalle de cada petición a `reports/<timestamp>/request/http/requests.csv`, incluyendo resumen por código de estado y por endpoint.
+   - Parámetros principales: `-LoadTotalRequests`, `-LoadConcurrency`, `-LoadNormalDelayMs`, `-LoadDurationSec`, `-BaseUrl`, `-UsersServiceUrl`, `-SkipRateLimitTest`.
    - **Modo carga sostenida (~5 min, >=20 req/s, mayoría sin 429)**:
      ```powershell
-     .\traffic-generator.ps1 -TotalRequests 300 -Concurrency 20 -DurationSec 300
+     .\chaos-ha.ps1 -Scenario request -LoadTotalRequests 300 -LoadConcurrency 20 -LoadDurationSec 300 -SkipRateLimitTest -Force
      ```
      IP rotativa en todas las requests (10.0.0.x) para evitar rate limit por IP y throttling de fallas. Sin bloque 429.
-   - **Modo con test de rate limiting (incluye bloque 429)**:
+   - **Modo con test de rate limiting (incluye bloque 429, criterio de la rúbrica)**:
      ```powershell
-     .\traffic-generator.ps1 -TotalRequests 300 -Concurrency 20 -DurationSec 300 -IncludeRateLimitTest
+     .\chaos-ha.ps1 -Scenario request -LoadTotalRequests 300 -LoadConcurrency 20 -LoadDurationSec 300 -Force
      ```
      Agrega 202 requests desde una sola IP (10.99.99.99) para disparar el rate limiter y el FailedRequestsThrottlingMiddleware.
-   - Requiere port-forward activo. El modo con `-IncludeRateLimitTest` consume el rate limit: esperar ~60 s entre corridas.
+   - Requiere port-forward activo. El modo con rate-limit test consume el rate limit: esperar ~60 s entre corridas.
 
 ---
 
 ## 5. Tareas Pendientes
 
-- [x] **Script de Ingeniería del Caos para Alta Disponibilidad**: Implementado `chaos-ha.ps1` (`Implementacion K8S/Codigo/chaos-engineering/`) para simular y validar de forma automatizada la auto-curación de pods (eliminación de pod + verificación de nueva réplica READY dentro del timeout, con Service respondiendo) y la activación del patrón de mitigación ante solicitudes fallidas (envío de requests inválidas y verificación de HTTP 429 con Retry-After).
+- [x] **Script de Ingeniería del Caos para Alta Disponibilidad**: Consolidado en `chaos-ha.ps1` (`Implementacion K8S/Codigo/chaos-engineering/`), único script de caos autocontenido. Valida la auto-curación de pods con el escenario `disconnect -DisconnectMode scale` (apagado de réplicas + verificación de que Kubernetes recupera réplicas READY dentro del timeout, con restauración automática) y la activación del patrón de mitigación ante solicitudes fallidas con el escenario `request` (envío de requests inválidas y verificación de HTTP 429 con header `Retry-After`).
+
+---
+
+## 6. Entrega 3 — Detección de anomalías, contención y caos
+
+### 6.1 Detección de anomalías (Isolation Forest + SVM RBF)
+
+Implementado en `Implementacion K8S/Codigo/anomaly-detection/`:
+
+| Pieza | Archivo |
+|---|---|
+| Carga y pivot del dataset AIOps 2018 | `src/anomaly/io.py` |
+| Features `value`, `diff_1`, `rolling_z`, calendario | `src/anomaly/features.py` |
+| Split temporal y pipeline | `src/anomaly/pipeline.py` |
+| Isolation Forest | `src/anomaly/models.py` |
+| One-Class SVM RBF | `src/anomaly/models.py` |
+| SVC RBF con submuestreo | `src/anomaly/models.py` |
+| Métricas ROC-AUC/PR-AUC/precision/recall/F1 | `src/anomaly/evaluate.py` |
+| Gráficos | `src/anomaly/plots.py` |
+| Persistencia `model.joblib` + métricas | `src/anomaly/registry.py` |
+| Descarga del dataset | `scripts/download_data.py` |
+| Entrenamiento | `scripts/train.py` |
+| Comparación de los 3 modelos | `scripts/compare.py` |
+| Notebook docente resuelta y ejecutada (IF + One-Class SVM RBF) | `notebooks/anomaly-detection-notebook.ipynb` |
+| Tests | `tests/` |
+
+Comandos:
+
+```bash
+cd "Implementacion K8S/Codigo/anomaly-detection"
+python scripts/download_data.py
+python scripts/train.py --model iforest
+python scripts/train.py --model oneclass_svm
+python scripts/train.py --model svc_rbf
+python scripts/compare.py
+```
+
+Resultado de la corrida de validación sobre los 4 KPIs del notebook (~146.218 filas,
+split 70/30):
+
+| Modelo | ROC-AUC | PR-AUC | Precision | Recall | F1 |
+|---|---:|---:|---:|---:|---:|
+| Isolation Forest | 0.790 | 0.188 | 0.092 | 0.558 | 0.158 |
+| One-Class SVM RBF | 0.885 | 0.695 | 0.105 | 0.787 | 0.185 |
+| SVC RBF | 0.895 | 0.255 | 0.209 | 0.743 | 0.326 |
+
+Notas:
+- El dataset AIOps 2018 se usa con su columna `label` para evaluar; la notebook
+  docente no usa etiquetas para entrenar, solo para evaluar.
+- `SVC` RBF se entrena con submuestreo estratificado (20.000 puntos por defecto) porque es O(n²).
+- `--tune` elige hiperparámetros en una franja de validación del train, nunca en test.
+
+#### Notebook docente (dataset primario del práctico)
+
+Se renombró la notebook `notebooks/detectores.ipynb` como
+`Implementacion K8S/Codigo/anomaly-detection/notebooks/anomaly-detection-notebook.ipynb`.
+Se completaron los `TODO` de las secciones 4–7 en sus secciones designadas y se
+dejó la sección 8 con la comparación. La estructura del docente se conserva y la
+notebook se ejecutó de punta a punta con Docker/nbconvert, conservando outputs.
+
+Resultado sobre las 300 ventanas sintéticas (53 anomalías, 17,7 %):
+
+| Detector | Precision | Recall | F1 | Alertas |
+|---|---:|---:|---:|---:|
+| k-sigma error | 1.000 | 0.189 | 0.317 | 10 |
+| k-sigma latencia | 1.000 | 0.151 | 0.262 | 8 |
+| MAD error | 0.944 | 0.321 | 0.479 | 18 |
+| MAD latencia | 1.000 | 0.679 | 0.809 | 36 |
+| Isolation Forest | 0.800 | 0.453 | 0.578 | 30 |
+| One-Class SVM RBF | 0.621 | 0.340 | 0.439 | 29 |
+
+La sección 7 es la sección designada para SVM RBF y usa `OneClassSVM(kernel="rbf")`;
+el `SVC` RBF supervisado queda en el módulo como validación complementaria.
+
+### 6.2 Plan de gestión y contención de incidentes
+
+Documento: `Implementacion K8S/Codigo/chaos-engineering/PLAN-CONTENCION-INCIDENTES.md`.
+
+El plan sigue la estructura de cinco fases del Incident Management Lifecycle:
+
+- **Prepare:** alcance, inventario/dependencias, roles (Incident Commander,
+  Responders, Stakeholders), on-call y escalamiento, matriz de severidad,
+  playbooks/runbooks y documentación/tracking.
+- **Detect:** Golden Signals, alertas accionables, logs estructurados JSON,
+  trazas distribuidas y MTTD.
+- **Respond:** confirmación y triaje, War Room, Incident Log, comunicación con
+  stakeholders y MTTA.
+- **Recover:** rollback, degradación controlada, circuit breaker, rate limiting,
+  checklist de validación post-recuperación y MTTR/TTRS.
+- **Learn:** blameless postmortem, timeline, causa raíz, corrección vs acción
+  correctiva, MTBF/MTBSI y validación con chaos engineering.
+
+Es la única copia del plan: se eliminaron las copias de `docs/` y el contenido
+que no formaba parte de esta estructura.
+
+### 6.3 Caos orquestado (6 escenarios + Game Day)
+
+Punto de entrada: `Implementacion K8S/Codigo/chaos-engineering/chaos-ha.ps1` (script único y autocontenido).
+
+| Escenario | Cómo se inyecta | Verificación |
+|---|---|---|
+| `request` | Generador de tráfico integrado (`Invoke-TrafficLoad`) con 4xx y rate-limit test | `429 > 0`, `5xx = 0`, header `Retry-After` |
+| `cpu` | Bucles de CPU en todos los pods | CPU ≥ 0.25 cores |
+| `memory` | Asignación de MB por réplica | Memoria/OOM |
+| `storage` | `dd` en `/tmp` por réplica | `df` crece |
+| `network` | `tc netem loss 100%` en todos los pods del deployment o NetworkPolicy | `up=0` o 5xx |
+| `disconnect` | `scale --replicas=0` o parcheo de Service | endpoints vacíos y recuperación |
+| `gametime` | Game Day: trafico **constante de 20 req/s** (pacer interno) + eventos de caos aleatorios (cpu, memoria OOM, kill de pod, scale-zero, apagón de red, latencia +2 s, aislamiento de la DB, llenado de disco y ráfaga de 429) | Constancia ≥ 90 %, eventos ≥ `GameTimeSec/60`, impacto visible y recuperación final |
+
+Cada corrida genera `reports/<timestamp>/<escenario>/` con snapshots de Prometheus
+y kubectl (baseline, impacto y **pico a mitad del estrés**: CPU OOMKill, `df`
+con el disco lleno, etc.), CSV HTTP y un `summary.md` consolidado. Los
+escenarios de cpu, memory y storage estresan **todas las réplicas** del
+deployment en paralelo; `high` garantiza OOMKill (512 MB por pod contra límite
+de 384Mi) y escribe 1 GB por réplica en `/tmp`.
+Limpieza: `chaos-cleanup.ps1` (qdiscs, NetworkPolicies, `/tmp/chaos_fill`, réplicas).
+
+### 6.4 Validación realizada
+
+- `pytest -q`: 7 tests pasan en contenedor Python 3.11.
+- `scripts/train.py --model iforest`: ejecuta sobre el dataset real y genera artefactos.
+- `scripts/compare.py`: entrena y compara los 3 modelos sobre el dataset real.
+- Notebook docente ejecutada de punta a punta con Docker/nbconvert; incluye TODO
+  resueltos, comparación y gráficos, conservando las preguntas de cierre.
+- `chaos-ha.ps1 -Scenario all -Force`: 6/6 escenarios PASS; evidencia en
+  `chaos-engineering/reports/20261107-191830/summary.md`.
+- Suite ejecutada con Minikube, `metrics-server` habilitado y datos de
+  `Backend/seed-data.sql` aplicados para que login y endpoints protegidos respondan.
+
+### 6.5 Pendientes
+
+- [x] Ejecutar la suite de caos completa contra el cluster local y archivar evidencias.
+- [ ] Adjuntar capturas de Grafana/Kibana al informe final.
+- [x] Incorporar y resolver la notebook docente de detectores (IF y One-Class SVM RBF).

@@ -57,3 +57,10 @@ k8s/.port-forward.pids
 # === Docker ===
 .docker/
 docker-compose.override.yml
+
+docs/
+
+# === AIOps 3: datos y reportes generados ===
+Implementacion K8S/Codigo/chaos-engineering/reports/
+Implementacion K8S/Codigo/anomaly-detection/data/raw/
+Implementacion K8S/Codigo/anomaly-detection/artifacts/
