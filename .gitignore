@@ -58,9 +58,8 @@ k8s/.port-forward.pids
 .docker/
 docker-compose.override.yml
 
+# === Extra ===
 docs/
 
-# === AIOps 3: datos y reportes generados ===
+# === Chaos Eng Reports ===
 Implementacion K8S/Codigo/chaos-engineering/reports/
-Implementacion K8S/Codigo/anomaly-detection/data/raw/
-Implementacion K8S/Codigo/anomaly-detection/artifacts/

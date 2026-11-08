@@ -161,60 +161,30 @@ Para comprobar que durante una actualización no se pierde una sola petición:
 
 ### 6.1 Detección de anomalías (Isolation Forest + SVM RBF)
 
-Implementado en `Implementacion K8S/Codigo/anomaly-detection/`:
+Implementación en `Implementacion K8S/Codigo/anomaly-detection/`, centrada en la
+notebook docente resuelta y ejecutada: `anomaly-detection-notebook.ipynb`
+(semilla 42, outputs conservados).
 
-| Pieza | Archivo |
+| Requisito de la rúbrica | Dónde se cumple |
 |---|---|
-| Carga y pivot del dataset AIOps 2018 | `src/anomaly/io.py` |
-| Features `value`, `diff_1`, `rolling_z`, calendario | `src/anomaly/features.py` |
-| Split temporal y pipeline | `src/anomaly/pipeline.py` |
-| Isolation Forest | `src/anomaly/models.py` |
-| One-Class SVM RBF | `src/anomaly/models.py` |
-| SVC RBF con submuestreo | `src/anomaly/models.py` |
-| Métricas ROC-AUC/PR-AUC/precision/recall/F1 | `src/anomaly/evaluate.py` |
-| Gráficos | `src/anomaly/plots.py` |
-| Persistencia `model.joblib` + métricas | `src/anomaly/registry.py` |
-| Descarga del dataset | `scripts/download_data.py` |
-| Entrenamiento | `scripts/train.py` |
-| Comparación de los 3 modelos | `scripts/compare.py` |
-| Notebook docente resuelta y ejecutada (IF + One-Class SVM RBF) | `notebooks/anomaly-detection-notebook.ipynb` |
-| Tests | `tests/` |
+| IsolationForest | Sección 6 de la notebook, con submuestreo `contamination` y score `-decision_function` |
+| Support Vector Machine con kernel RBF | Sección 7: `OneClassSVM(kernel="rbf", gamma="scale")`, entrenado solo con datos normales |
+| Baseline univariado | Sección 4–5: k-sigma y MAD (TODOs del docente resueltos) |
+| Comparación y gráficos | Sección 8 |
+| Preguntas de cierre | Sección 9 |
 
-Comandos:
+Ejecución:
 
 ```bash
-cd "Implementacion K8S/Codigo/anomaly-detection"
-python scripts/download_data.py
-python scripts/train.py --model iforest
-python scripts/train.py --model oneclass_svm
-python scripts/train.py --model svc_rbf
-python scripts/compare.py
+docker run --rm -v "${PWD}:/app" \
+  -w "/app/Implementacion K8S/Codigo/anomaly-detection" \
+  python:3.11-slim bash -lc \
+  "pip install --no-cache-dir -r requirements-notebook.txt && \
+   jupyter nbconvert --to notebook --execute --inplace \
+   anomaly-detection-notebook.ipynb"
 ```
 
-Resultado de la corrida de validación sobre los 4 KPIs del notebook (~146.218 filas,
-split 70/30):
-
-| Modelo | ROC-AUC | PR-AUC | Precision | Recall | F1 |
-|---|---:|---:|---:|---:|---:|
-| Isolation Forest | 0.790 | 0.188 | 0.092 | 0.558 | 0.158 |
-| One-Class SVM RBF | 0.885 | 0.695 | 0.105 | 0.787 | 0.185 |
-| SVC RBF | 0.895 | 0.255 | 0.209 | 0.743 | 0.326 |
-
-Notas:
-- El dataset AIOps 2018 se usa con su columna `label` para evaluar; la notebook
-  docente no usa etiquetas para entrenar, solo para evaluar.
-- `SVC` RBF se entrena con submuestreo estratificado (20.000 puntos por defecto) porque es O(n²).
-- `--tune` elige hiperparámetros en una franja de validación del train, nunca en test.
-
-#### Notebook docente (dataset primario del práctico)
-
-Se renombró la notebook `notebooks/detectores.ipynb` como
-`Implementacion K8S/Codigo/anomaly-detection/notebooks/anomaly-detection-notebook.ipynb`.
-Se completaron los `TODO` de las secciones 4–7 en sus secciones designadas y se
-dejó la sección 8 con la comparación. La estructura del docente se conserva y la
-notebook se ejecutó de punta a punta con Docker/nbconvert, conservando outputs.
-
-Resultado sobre las 300 ventanas sintéticas (53 anomalías, 17,7 %):
+Resultado sobre el dataset del práctico (300 ventanas, 53 anomalías, 17,7 %):
 
 | Detector | Precision | Recall | F1 | Alertas |
 |---|---:|---:|---:|---:|
@@ -225,8 +195,8 @@ Resultado sobre las 300 ventanas sintéticas (53 anomalías, 17,7 %):
 | Isolation Forest | 0.800 | 0.453 | 0.578 | 30 |
 | One-Class SVM RBF | 0.621 | 0.340 | 0.439 | 29 |
 
-La sección 7 es la sección designada para SVM RBF y usa `OneClassSVM(kernel="rbf")`;
-el `SVC` RBF supervisado queda en el módulo como validación complementaria.
+El dataset es el que incluye la notebook docente, y la estructura original
+(sus secciones y sus TODOs) se conserva.
 
 ### 6.2 Plan de gestión y contención de incidentes
 
@@ -273,11 +243,9 @@ Limpieza: `chaos-cleanup.ps1` (qdiscs, NetworkPolicies, `/tmp/chaos_fill`, répl
 
 ### 6.4 Validación realizada
 
-- `pytest -q`: 7 tests pasan en contenedor Python 3.11.
-- `scripts/train.py --model iforest`: ejecuta sobre el dataset real y genera artefactos.
-- `scripts/compare.py`: entrena y compara los 3 modelos sobre el dataset real.
-- Notebook docente ejecutada de punta a punta con Docker/nbconvert; incluye TODO
-  resueltos, comparación y gráficos, conservando las preguntas de cierre.
+- Notebook docente ejecutada de punta a punta con Docker/nbconvert; incluye los
+  `TODO` resueltos, IsolationForest (sección 6) y One-Class SVM RBF (sección 7),
+  comparación y gráficos, conservando las preguntas de cierre.
 - `chaos-ha.ps1 -Scenario all -Force`: 6/6 escenarios PASS; evidencia en
   `chaos-engineering/reports/20261107-191830/summary.md`.
 - Suite ejecutada con Minikube, `metrics-server` habilitado y datos de
