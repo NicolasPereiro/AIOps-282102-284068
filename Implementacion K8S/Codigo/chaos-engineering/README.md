@@ -8,7 +8,7 @@ monitoreo segundo a segundo en vivo por terminal.
 
 ```text
 chaos-engineering/
-├── chaos.ps1                     ← Script principal de caos (20 req/s 90/10 + 11 eventos aleatorios)
+├── chaos.ps1                     ← Script principal de caos (20 req/s 90/10 + 12 eventos aleatorios (incluye spike a 100 req/s))
 ├── chaos-cleanup.ps1             ← Limpieza/restauración de emergencia (Recover)
 ├── PLAN-CONTENCION-INCIDENTES.md ← Plan operativo (Prepare/Detect/Respond/Recover/Learn)
 └── README.md

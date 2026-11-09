@@ -92,7 +92,8 @@ Todos los microservicios sin estado (`pharmago-ui`, `pharmago-users-service`, `p
 Para comprobar que durante una actualización no se pierde una sola petición:
 1. Iniciar un flujo continuo de tráfico con el generador:
    ```powershell
-   .\traffic-generator.ps1 -TotalRequests 200 -Concurrency 5 -DelayMs 100
+   cd "Implementacion K8S\Codigo\chaos-engineering"
+   .\chaos.ps1
    ```
 2. Provocar el reemplazo de componentes (rollout):
    ```bash
@@ -104,8 +105,6 @@ Para comprobar que durante una actualización no se pierde una sola petición:
 ---
 
 ## 4. Telemetría
-
-### Cumplimiento de la rúbrica (según "Obligatorio AIOps")
 
 | Requisito | Estado | Implementación |
 |---|---|---|
@@ -127,28 +126,36 @@ Para comprobar que durante una actualización no se pierde una sola petición:
 - **Alertas de Grafana**:
   - ConfigMap `grafana-alerting.yaml` con 5 reglas de anomalías: tasa de errores HTTP > 5%, latencia media > 1s, rate limit 429 > 5 req/s, CPU pod > 85%, memoria > 85% (riesgo OOM).
   - Montado en el deployment de Grafana bajo `/etc/grafana/provisioning/alerting/`.
-  - Validación integrada en `setup-dashboards.ps1` (consulta `api/v1/provisioning/alert-rules`).
+  - Configuración y aprovisionamiento unificados directamente dentro de `apply-k8s.ps1` y `apply-k8s.sh` (dashboards de Grafana, reglas de alerta, importación de Data Views/Dashboards en Kibana vía `kibana-dashboards.ndjson` y datos de prueba vía `seed-data.sql`).
 
-- **Script de tráfico mixto (`traffic-generator.ps1`)**:
-  - Ubicación: `Implementacion K8S/Codigo/chaos-engineering/traffic-generator.ps1`.
-  - Genera peticiones HTTP mixtas (códigos 200 y 4XX: 400, 401, 404 y 429) contra los servicios de Users y Pharmacy a través del API Gateway (`http://127.0.0.1:5000`).
-  - Obtiene tokens de sesión con las credenciales sembradas (`admin`, `empleado`, `duenio`) para ejercitar endpoints protegidos y generar 401 en accesos sin token.
-  - Ejecuta con un pool de runspaces configurable (`-Concurrency`) y exporta el detalle de cada petición a `traffic-results.csv`, incluyendo resumen por código de estado y por endpoint.
-   - Parámetros principales: `-TotalRequests`, `-Concurrency`, `-DelayMs`, `-BaseUrl`, `-UsersServiceUrl`, `-OutputCsv`, `-DurationSec`, `-IncludeRateLimitTest`.
-   - **Modo carga sostenida (~5 min, >=20 req/s, mayoría sin 429)**:
-     ```powershell
-     .\traffic-generator.ps1 -TotalRequests 300 -Concurrency 20 -DurationSec 300
-     ```
-     IP rotativa en todas las requests (10.0.0.x) para evitar rate limit por IP y throttling de fallas. Sin bloque 429.
-   - **Modo con test de rate limiting (incluye bloque 429)**:
-     ```powershell
-     .\traffic-generator.ps1 -TotalRequests 300 -Concurrency 20 -DurationSec 300 -IncludeRateLimitTest
-     ```
-     Agrega 202 requests desde una sola IP (10.99.99.99) para disparar el rate limiter y el FailedRequestsThrottlingMiddleware.
-   - Requiere port-forward activo. El modo con `-IncludeRateLimitTest` consume el rate limit: esperar ~60 s entre corridas.
-
----
-
-## 5. Tareas Pendientes
-
-- [x] **Script de Ingeniería del Caos para Alta Disponibilidad**: Implementado `chaos-ha.ps1` (`Implementacion K8S/Codigo/chaos-engineering/`) para simular y validar de forma automatizada la auto-curación de pods (eliminación de pod + verificación de nueva réplica READY dentro del timeout, con Service respondiendo) y la activación del patrón de mitigación ante solicitudes fallidas (envío de requests inválidas y verificación de HTTP 429 con Retry-After).
+- **Script de Chaos Engineering y Tráfico Constante (`chaos.ps1`)**:
+  - Ubicación: `Implementacion K8S/Codigo/chaos-engineering/chaos.ps1`.
+  - **Ejecución directa y automatizada**: No requiere parámetros ni decoradores de entrada (`.\chaos.ps1`). Todo el flujo está preconfigurado.
+  - **Tráfico constante a 20 req/s con 20 usuarios simulados**:
+    - Genera exactamente 20 peticiones por segundo simulando 20 usuarios concurrentes (`User-01` a `User-20`) con IPs virtuales rotativas independientes.
+    - Utiliza un pool asíncrono de runspaces (32 hilos) que mantiene estable la cadencia de 20 req/s independientemente de la latencia o degradación inducida en el backend.
+    - **Distribución estricta 90% / 10%**:
+      - **90% (18 req/s)** dirigidas a endpoints válidos con respuesta esperada `200 OK` (públicos y protegidos con tokens JWT de `admin`, `empleado01` y `owner001`).
+      - **10% (2 req/s)** diseñadas para inducir errores controlados de cliente (`400 Bad Request`, `401 Unauthorized`, `404 Not Found`).
+  - **Resiliencia de conectividad (Auto-port-forward)**:
+    - Detecta y reconecta de forma automática en background el túnel `port-forward` al API Gateway (`http://127.0.0.1:5000`) si este se desconecta al ser eliminado el pod del Gateway durante una prueba de caos.
+  - **Inyección aleatoria de eventos de caos en paralelo**:
+    - Mientras el flujo de 20 req/s permanece constante, se dispara automáticamente un evento de caos cada 20–25 segundos (sin repetir el anterior):
+      1. **Caída de pod (API Gateway)**: Elimina un pod aleatorio del Gateway, verifica la auto-curación del ReplicaSet y reconecta el túnel si es necesario.
+      2. **Caída de pod (Users Service)**: Elimina un pod de `users-service` y valida la derivación de tráfico a la réplica restante.
+      3. **Caída de pod (Pharmacy Service)**: Elimina un pod de `pharmacy-service` y valida la auto-curación.
+      4. **Caída / Aislamiento de Base de Datos**: Aísla temporalmente el Service `pharmago-db` durante 15 s observando errores 500 en rutas dependientes de datos y restaurando el selector automáticamente.
+      5. **Inducción de latencia**: Inyecta bloqueos transaccionales con `WAITFOR DELAY` en SQL Server elevando la latencia p95 por encima de 1.200 ms sin reiniciar pods ni requerir imágenes externas.
+      6. **Spike de CPU**: Ejecuta busy-loops paralelos en las réplicas del microservicio objetivo llevando el uso de CPU al 100% de su límite asignado durante 20 s.
+      7. **Poca memoria disponible**: Asigna buffers de memoria en los pods superando el 85% del límite (riesgo OOM) durante 18 s y los libera de forma segura.
+      8. **Aumento de disco**: Escribe 500 MB en `/tmp` del pod objetivo comprobando el aumento con `df -h` y liberando el espacio tras 15 s.
+      9. **Ráfaga de Rate-Limit (HTTP 429)**: Lanza una ráfaga DoS desde una IP atacante aislada (`10.99.99.99`) para forzar la activación de las reglas de rate-limiting y throttling del Gateway.
+      10. **Apagado total temporal de microservicio (Scale 0)**: Escala temporalmente un microservicio a 0 réplicas (errores 502/503 en Gateway) y lo restaura automáticamente a 2 réplicas.
+      11. **Tormenta de queries pesadas en SQL**: Lanza consultas masivas concurrentes contra SQL Server para estresar el motor de base de datos.
+  - **Monitoreo en vivo y restauración limpia**:
+    - Muestra en consola un ticker segundo a segundo con el estado en tiempo real (tasa real, códigos 2xx, 4xx, 5xx, 429, latencia media y percentil 95).
+    - Muestra banners claros con el inicio y fin de cada evento de caos.
+    - Captura interrupciones (`Ctrl+C`) en un bloque `finally` para asegurar que las réplicas se restauren a 2, el Service de la DB quede enrutado y los archivos temporales se eliminen.
+  - **Carga de datos de prueba y Dashboards en el despliegue**:
+    - La inicialización de [`seed-data.sql`](file:///c:/ID/AIOps-282102-284068/Implementacion%20K8S/Codigo/Backend/seed-data.sql) se integró directamente en el paso 10 de [`apply-k8s.ps1`](file:///c:/ID/AIOps-282102-284068/Implementacion%20K8S/Codigo/k8s/apply-k8s.ps1) y [`apply-k8s.sh`](file:///c:/ID/AIOps-282102-284068/Implementacion%20K8S/Codigo/k8s/apply-k8s.sh), garantizando que la base de datos quede poblada de forma idempotente desde el primer despliegue del cluster.
+    - El aprovisionamiento de Dashboards y Data Views de Kibana ([`kibana-dashboards.ndjson`](file:///c:/ID/AIOps-282102-284068/Implementacion%20K8S/Codigo/k8s/kibana-dashboards.ndjson)) y los ConfigMaps de Grafana se integraron en el paso 11 de `apply-k8s.ps1` y `apply-k8s.sh`, unificando todo el ciclo de vida de la infraestructura, datos y observabilidad en un único comando.
