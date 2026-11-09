@@ -10,6 +10,20 @@ SQL Server y la capa de observabilidad (Prometheus, Grafana, OTEL Collector).
 grupo de mensajería; War Room remota.  
 **Revisión:** al cerrar cada incidente SEV-1/SEV-2 y después de cada game day.
 
+## Diseño de gestión: ceremonias y artefactos por etapa
+
+Cada fase del ciclo de vida se **implementa** con una ceremonia específica y sus
+artefactos asociados; la mecánica de cada una se detalla en su sección. Esta es
+la propuesta de gestión de incidentes del equipo:
+
+| Etapa | Ceremonia propuesta | Artefactos | Métrica objetivo |
+|---|---|---|---|
+| **1. Prepare** | Brief de cambio de guardia (5 min semanal) | Roles IC/Responder/Stakeholder, matriz de severidad, runbooks (§1.4), tracking en Git | Disponibilidad para responder |
+| **2. Detect** | Revisión de alertas tras cada game day | Dashboards de Golden Signals, alertas sobre SLI/SLO, logs JSON, trazas OTEL | `MTTD` (reducir) |
+| **3. Respond** | War Room con roles estrictamente diferenciados | Incident Log (timeline con marca temporal), comunicación a stakeholders | `MTTA` (reducir) |
+| **4. Recover** | Checklist de validación post-recuperación (go/no-go del IC) | Checklist de estabilidad (§4.2), estrategia de mitigación aplicada | `MTTR` / `TTRS` (reducir) |
+| **5. Learn** | Blameless postmortem | Documento de postmortem (timeline, causa raíz, acciones correctivas con dueño y plazo), issues en Git | `MTBF` / `MTBSI` (aumentar) |
+
 ---
 
 ## 1. Prepare (Preparación previa al fallo)

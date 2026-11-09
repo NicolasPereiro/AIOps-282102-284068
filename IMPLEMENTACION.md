@@ -164,6 +164,29 @@ Para comprobar que durante una actualización no se pierde una sola petición:
 
 ## 6. Entrega 3 — Detección de anomalías, contención y caos
 
+### Informe corto
+
+La entrega cumple los tres ítems de la rúbrica con evidencia ejecutada: dos
+detectores de anomalías implementados sobre el dataset provisto por los docentes,
+un plan de contención de incidentes operacionales y un script de caos que prueba
+las seis inyecciones exigidas.
+
+- **Detección de anomalías (§6.1):** Isolation Forest y One-Class SVM con kernel
+  RBF sobre la notebook docente, ejecutada de punta a punta; las preguntas de
+  cierre y el exit ticket se resuelven **dentro de la propia notebook** (sección
+  9), citando las tablas y gráficos ejecutados.
+- **Plan de contención (§6.2):** propuesta de diseño de gestión basada en el
+  Incident Management Lifecycle de Atlassian, adaptada a 2 integrantes y
+  versionada en el repositorio como única fuente de verdad: cada etapa se
+  implementa con una ceremonia y sus artefactos (brief de cambio de guardia,
+  War Room, Incident Log, checklist de recuperación, blameless postmortem) y sus
+  runbooks espejan los escenarios probados por el script de caos, de modo que el
+  plan sirve como guía de acción real ante cada falla inyectada.
+- **Scripts de caos (§6.3):** game day con tráfico constante de 20 req/s y
+  eventos que cubren las seis inyecciones (requests, CPU, memoria, storage,
+  interrupción de red y desconexión de componentes), con la validación live
+  documentada en §6.4.
+
 ### 6.1 Detección de anomalías (Isolation Forest + SVM RBF)
 
 Implementación en `Implementacion K8S/Codigo/anomaly-detection/`, centrada en la
@@ -222,7 +245,10 @@ El plan sigue la estructura de cinco fases del Incident Management Lifecycle:
   correctiva, MTBF/MTBSI y validación con chaos engineering.
 
 Es la única copia del plan: se eliminaron las copias de `docs/` y el contenido
-que no formaba parte de esta estructura.
+que no formaba parte de esta estructura. Cada etapa se **implementa** con una
+ceremonia y sus artefactos (tabla de "Diseño de gestión" al inicio del
+documento); la documentación asociada (runbooks, evidencia de caos) vive en el
+repositorio como se pide en la consigna.
 
 ### 6.3 Caos orquestado (Game Day con tráfico constante)
 
