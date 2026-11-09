@@ -13,6 +13,15 @@ $TargetRate = 20        # 20 req/segundo
 $SimulatedUsers = 20    # 20 usuarios virtuales concurrentes
 $IntervalMs = 50        # 1000ms / 20 = 50ms por request
 
+# Duracion opcional de la corrida via variable de entorno (para corridas automatizadas).
+# Sin definirla, el motor corre indefinido hasta Ctrl+C (uso normal: .\chaos.ps1).
+$MaxDurationSec = 0
+try {
+    $envDur = [Environment]::GetEnvironmentVariable("CHAOS_DURATION_SEC")
+    if ($envDur) { $MaxDurationSec = [int]$envDur }
+} catch { }
+if ($MaxDurationSec -lt 0) { $MaxDurationSec = 0 }
+
 # Helpers de formato en terminal
 function Write-Header([string]$text) {
     Write-Host ""
@@ -421,6 +430,38 @@ function Chaos-DbHeavyQueries {
     Write-EventEnd "SUGERIDO: TORMENTA DE QUERIES PESADAS EN SQL" "Tormenta de consultas SQL finalizada."
 }
 
+function Chaos-NetemBlackout {
+    Write-EventBanner "INTERRUPCION DE TRAFICO DE RED (NETEM)" "Aplicando tc netem loss 100% en pods de pharmago-users-service por 15s"
+    $pods = @((kubectl get pods -n $Namespace -l app=pharmago-users-service -o jsonpath='{.items[*].metadata.name}' 2>$null).Trim() -split '\s+' | Where-Object { $_ })
+    if ($pods.Count -eq 0) {
+        Write-EventEnd "INTERRUPCION DE TRAFICO DE RED (NETEM)" "No hay pods running; evento omitido."
+        return
+    }
+    foreach ($pod in $pods) {
+        Write-Host "  -> Creando contenedor efimero chaos-net en $pod" -ForegroundColor Yellow
+        kubectl debug -n $Namespace "pod/$pod" --profile=netadmin --image=nicolaka/netshoot --attach=false -c chaos-net -- sh -c "sleep 90" 2>&1 | Out-Null
+        $deadline = (Get-Date).AddSeconds(45)
+        do {
+            $rdy = [string](kubectl get pod $pod -n $Namespace -o jsonpath='{.status.ephemeralContainerStatuses[?(@.name=="chaos-net")].state.running.startedAt}' 2>$null)
+            if (-not [string]::IsNullOrWhiteSpace($rdy)) { break }
+            Start-Sleep -Milliseconds 800
+        } while ((Get-Date) -lt $deadline)
+        if ($rdy) {
+            Write-Host "  -> tc netem loss 100% en $pod" -ForegroundColor Yellow
+            kubectl exec -n $Namespace $pod -c chaos-net -- tc qdisc add dev eth0 root netem loss 100% 2>&1 | Out-Null
+        }
+    }
+    for ($s = 1; $s -le 15; $s++) {
+        Start-Sleep -Seconds 1
+        Process-TrafficBatch
+    }
+    foreach ($pod in $pods) {
+        # El pod se recrea por el ReplicaSet sin el contenedor efimero (qdisc incluido)
+        kubectl delete pod $pod -n $Namespace --wait=false 2>&1 | Out-Null
+    }
+    Write-EventEnd "INTERRUPCION DE TRAFICO DE RED (NETEM)" "Blackout de 15s aplicado; pods recreados por el ReplicaSet con red limpia."
+}
+
 # Lista de todos los eventos aleatorios disponibles
 $allChaosEvents = @(
     @{ Name = "KillPodGateway";      Action = { Chaos-KillPodGateway } },
@@ -434,7 +475,8 @@ $allChaosEvents = @(
     @{ Name = "DiskFill";            Action = { Chaos-DiskFill } },
     @{ Name = "RateLimitBurst";      Action = { Chaos-RateLimitBurst } },
     @{ Name = "ScaleZeroBlackout";   Action = { Chaos-ScaleZeroBlackout } },
-    @{ Name = "DbHeavyQueries";      Action = { Chaos-DbHeavyQueries } }
+    @{ Name = "DbHeavyQueries";      Action = { Chaos-DbHeavyQueries } },
+    @{ Name = "NetemBlackout";       Action = { Chaos-NetemBlackout } }
 )
 
 # ==============================================================================
@@ -451,6 +493,12 @@ $globalErrors = 0
 $scriptStartTime = [DateTime]::UtcNow
 $script:targetRate = $TargetRate
 $script:inLatencyChaos = $false
+
+# Carpeta de evidencia de la corrida (reports/ esta en .gitignore)
+$reportDir = Join-Path $PSScriptRoot ("reports\" + (Get-Date -Format "yyyyMMdd-HHmmss"))
+New-Item -ItemType Directory -Force -Path $reportDir | Out-Null
+$trafficCsv = Join-Path $reportDir "traffic.csv"
+$script:eventLog = New-Object System.Collections.Generic.List[string]
 
 function Process-TrafficBatch {
     # 1. Recolectar resultados completados del pool
@@ -521,6 +569,7 @@ function Process-TrafficBatch {
     $c4xx = @($batchResults | Where-Object { $_.StatusCode -ge 400 -and $_.StatusCode -lt 500 }).Count
     $c5xx = @($batchResults | Where-Object { $_.StatusCode -ge 500 }).Count
     $c429 = @($batchResults | Where-Object { $_.StatusCode -eq 429 }).Count
+    $cNetErrors = @($batchResults | Where-Object { $_.StatusCode -eq 0 }).Count
     $latencies = @($batchResults | ForEach-Object { [double]$_.ElapsedMs } | Sort-Object)
     
     $avgMs = 0; $p95Ms = 0
@@ -536,6 +585,7 @@ function Process-TrafficBatch {
     $script:global4xx += $c4xx
     $script:global5xx += $c5xx
     $script:global429 += $c429
+    $script:globalErrors += $cNetErrors
 
     $pct2xx = if ($secCount -gt 0) { [math]::Round(($c2xx / $secCount) * 100, 1) } else { 0.0 }
     $pct4xx = if ($secCount -gt 0) { [math]::Round(($c4xx / $secCount) * 100, 1) } else { 0.0 }
@@ -554,6 +604,19 @@ function Process-TrafficBatch {
         $nowStr, $elapsedSec, $secCount, $c2xx, $pct2xx, $c4xx, $pct4xx, $c5xx, $c429, $avgMs, $p95Ms, $globPct2xx, $globPct4xx
     
     Write-Host $statusMsg -ForegroundColor $lineColor
+
+    # Evidencia persistente: una fila por segundo en reports/<timestamp>/traffic.csv
+    [pscustomobject]@{
+        Timestamp = $nowStr
+        RateSec   = $secCount
+        Ok2xx     = $c2xx
+        Err4xx    = $c4xx
+        Err5xx    = $c5xx
+        Err429    = $c429
+        NetErr    = $cNetErrors
+        AvgMs     = $avgMs
+        P95Ms     = $p95Ms
+    } | Export-Csv -Path $trafficCsv -Append -NoTypeInformation -Encoding utf8
 }
 
 # ==============================================================================
@@ -572,6 +635,11 @@ $lastEventName = ""
 
 try {
     while ($true) {
+        # Duracion acotada opcional para corridas automatizadas (CHAOS_DURATION_SEC)
+        if ($MaxDurationSec -gt 0 -and ([DateTime]::UtcNow - $scriptStartTime).TotalSeconds -ge $MaxDurationSec) {
+            Write-Header "DURACION ALCANZADA ($MaxDurationSec s) - finalizando en forma ordenada"
+            break
+        }
         $secondStart = [DateTime]::UtcNow
         Process-TrafficBatch
 
@@ -585,6 +653,7 @@ try {
 
             $lastEventName = $chosen.Name
             & $chosen.Action
+            $script:eventLog.Add(("{0:HH:mm:ss} - {1}" -f (Get-Date), $chosen.Name))
 
             $lastChaosTime = [DateTime]::UtcNow
             $nextChaosDelay = Get-Random -Minimum $minSecondsBetweenChaos -Maximum $maxSecondsBetweenChaos
@@ -657,7 +726,30 @@ try {
     Write-Host "  Peticiones 4xx (Cliente):    $global4xx ($finalPct4xx %)" -ForegroundColor Yellow
     Write-Host "  Peticiones 5xx (Servidor):   $global5xx ($finalPct5xx %)" -ForegroundColor Red
     Write-Host "  Peticiones 429 (Rate Limit): $global429" -ForegroundColor Magenta
+    Write-Host "  Errores de red (timeout/conexion): $globalErrors" -ForegroundColor Red
     Write-Host ""
     Write-Host "Cluster restaurado y saludable." -ForegroundColor Green
+
+    # Evidencia de la corrida en reports/<timestamp>/summary.md
+    try {
+        $lines = @(
+            "# Corrida de caos PharmaGo (chaos.ps1)",
+            "",
+            "- Fecha: $((Get-Date).ToString('o'))",
+            "- Duracion: ${dur}s (CHAOS_DURATION_SEC = $(if ($MaxDurationSec -gt 0) { "$MaxDurationSec" } else { "infinita (cortada con Ctrl+C)" }))",
+            "- Requests totales: $globalTotal",
+            "- 2xx: $global2xx | 4xx: $global4xx | 5xx: $global5xx | 429: $global429 | netErr: $globalErrors",
+            "- Trafico: 20 req/s segregados en 18 peticiones validas + 2 inyectoras de error por segundo",
+            "",
+            "## Eventos de caos ejecutados",
+            ""
+        )
+        $lines += if ($script:eventLog.Count -gt 0) { @($script:eventLog) } else { @("(ninguno)") }
+        $lines += @("", "Detalle por segundo en traffic.csv (tasa, codigos, latencia media y p95).")
+        $summaryPath = Join-Path $reportDir "summary.md"
+        $lines | Set-Content -Path $summaryPath -Encoding utf8
+        Write-Host ""
+        Write-Host "  Evidencia de la corrida: $reportDir" -ForegroundColor Cyan
+    } catch { }
     Write-Host ""
 }

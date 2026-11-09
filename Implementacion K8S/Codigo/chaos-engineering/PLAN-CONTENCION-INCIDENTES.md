@@ -61,7 +61,7 @@ la **violación de un SLO/SLA**, no según la dificultad técnica de diagnostica
 
 Guías paso a paso para los escenarios más probables del stack. Cada playbook define
 pasos ordenados, responsable asignado y comandos de mitigación concretos. Los
-escenarios se validan en los game days de caos ejecutados con `chaos-ha.ps1`.
+escenarios se validan en los game days de caos ejecutados con `chaos.ps1`.
 
 | Escenario | Pasos recomendados | Responsable | Acciones de mitigación (comandos) |
 |---|---|---|---|
@@ -69,7 +69,7 @@ escenarios se validan en los game days de caos ejecutados con `chaos-ha.ps1`.
 | **Fallas en cascada** | Confirmar si el origen fue un microservicio o la DB; revisar trazas/logs para ver la cadena; contener el flujo desde la capa más alta afectada. | IC + Responder | Aplicar rate limiting (HTTP 429) para contener la entrada; `kubectl scale deployment <svc> -n pharmago --replicas=0` como opción extrema para aislar. |
 | **Degradación de dependencias** | Identificar la dependencia (Users/Pharmacy) con latencia alta; evaluar Circuit Breaker en API Gateway; degradar de forma controlada. | IC | Habilitar o reforzar rate limiting; abrir circuito en la ruta afectada; aislar el componente sin caer el core. |
 | **Saturación de recursos** | Identificar el pod objetivo (CPU/memoria/storage); confirmar vía `kubectl top pods`; decidir rollback o contención. | Responder | Si es un workload no crítico, escalar réplicas; si es core y hubo deploy reciente, `kubectl rollout undo deployment/<target> -n pharmago`. |
-| **Saturación de tráfico** | Identificar origen (tormenta de requests o retry); esperar a que el API Gateway aplique rate limiting; registrar el patrón de tráfico. | IC | Con el rate limiter activo, observar `429` en `chaos-ha.ps1 -Scenario request`; ajustar límites si es necesario. |
+| **Saturación de tráfico** | Identificar origen (tormenta de requests o retry); esperar a que el API Gateway aplique rate limiting; registrar el patrón de tráfico. | IC | Con el rate limiter activo, observar la ola de `429` del evento `RateLimitBurst` en `chaos.ps1`; ajustar límites si es necesario. |
 | **Caída de un pod o componente** | Confirmar con `kubectl get pods` y timeline de eventos; revisar restart count y readiness; ver trazas/logs. | Responder | `kubectl delete pod <pod> -n pharmago` para validar self-healing del Deployment; si persiste, rollback. |
 
 El IC confirma los pasos completados. Si un integrante no está disponible, el otro
@@ -260,6 +260,7 @@ está documentado en el plan. Se inyectan fallas con:
 - **Corte de tráfico de red** (`tc netem` o NetworkPolicy).
 - **Caída forzada de pods / desconexión de componentes internos.**
 
-El orquestador `chaos-ha.ps1` ejecuta esos experimentos y deja evidencia en
-`reports/<timestamp>/summary.md`; ese reporte es la entrada directa al postmortem
+El motor de caos `chaos.ps1` ejecuta esos experimentos con tráfico constante de
+20 req/s y deja evidencia en `reports/<timestamp>/summary.md` (más
+`traffic.csv` por segundo); ese reporte es la entrada directa al postmortem
 de la sección 5.1 y a las acciones correctivas de la sección 5.2.

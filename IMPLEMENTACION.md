@@ -90,7 +90,7 @@ Todos los microservicios sin estado (`pharmago-ui`, `pharmago-users-service`, `p
 
 ### Procedimiento de Validación de Disponibilidad
 Para comprobar que durante una actualización no se pierde una sola petición:
-1. Iniciar un flujo continuo de tráfico con el generador:
+1. Iniciar un flujo continuo de tráfico con el motor integrado en `chaos.ps1`:
    ```powershell
    cd "Implementacion K8S\Codigo\chaos-engineering"
    .\chaos.ps1
@@ -100,7 +100,7 @@ Para comprobar que durante una actualización no se pierde una sola petición:
    kubectl rollout restart deployment pharmago-users-service -n pharmago
    kubectl rollout status deployment pharmago-users-service -n pharmago
    ```
-3. Verificar en `traffic-results.csv` que el 100% de las respuestas son exitosas (cero errores HTTP 502/503/504 por caída de pods).
+3. Verificar en `chaos-engineering/reports/<timestamp>/traffic.csv` que durante el rollout la tasa se mantiene en 20 req/s y que el 100% de las respuestas siguen exitosas (cero errores HTTP 502/503/504 por caída de pods).
 
 ---
 

@@ -41,204 +41,67 @@ canónica del plan y vive dentro de la carpeta de código.
 El script está 100% preconfigurado y no requiere parámetros ni decoradores de entrada:
 
 ```powershell
-cd "Implementacion K8S\Codigo\chaos-engineering"
 .\chaos.ps1
 ```
 
-Durante la ejecución verás en la terminal:
-- Ticker en tiempo real segundo a segundo con el estado del tráfico (req/s, 2xx, 4xx, 5xx, 429, latencias p95 y acumulados).
-- Banners destacados con el inicio y fin de cada evento de caos.
-- Al presionar `Ctrl+C` se ejecuta una limpieza automática que restaura réplicas en 2, reasocia el servicio de la base de datos y limpia archivos temporales de disco.
+## Cómo funciona
 
-Salida esperada:
+- **Port-forward automático**: si `127.0.0.1:5000/health` no responde, el script
+  levanta el forward al gateway solo y reintentos en cada caída de pod.
+- **20 usuarios virtuales** (`User-01`…`User-20`, IP rotativa `10.100.x.y`) sobre
+  un runspace pool; timeout de 8 s por request.
+- **Mezcla por segundo**: 18 peticiones válidas (90 %, con tokens de los roles
+  sembrados `admin`/`empleado01`/`owner001`) + 2 inyectoras de error (400/401/404).
+- **Consola en vivo** segundo a segundo: tasa, 2xx/4xx/5xx/429, latencia media y
+  p95, acumulados de la sesión.
+- **Un evento de caos aleatorio cada 20-25 s** (sin repetir el anterior).
+- **Ctrl+C para cortar**: el `finally` drena el pool, restaura réplicas de los
+  deployments, el selector del Service de la DB y borra archivos temporales en
+  pods; al final imprime el resumen de la corrida.
+- **Evidencia en `reports/<timestamp>/`** (ignorada por git): `traffic.csv`
+  con una fila por segundo (tasa, 2xx/4xx/5xx/429/netErr, avg/p95) y
+  `summary.md` con el total de requests, códigos y la lista de eventos ejecutados.
 
-```text
-reports/20261106-120000/
-├── summary.json
-├── summary.md
-├── request/
-│   ├── http/requests.csv
-│   ├── kubectl/baseline.txt, impact.txt, ...
-│   └── prometheus/baseline.json, impact.json
-├── cpu/...
-├── memory/...
-├── storage/...
-├── network/...
-└── disconnect/...
-```
+## Eventos de caos disponibles (se sortean aleatoriamente)
 
-El exit code es `0` si todos los escenarios pasan y `1` si alguno falla.
+| Evento | Inyección |
+|---|---|
+| `KillPodGateway` / `KillPodUsers` / `KillPodPharmacy` | caída de pod aleatorio (auto-curación del ReplicaSet) |
+| `CpuSpike` | busy-loops al 100 % en todos los pods de users-service (20 s) |
+| `LowMemory` | buffer de 300 MB en pods de pharmacy (límite 384Mi → uso > 85 %) |
+| `DiskFill` | archivo de 500 MB en `/tmp` de un pod del gateway + limpieza |
+| `NetemBlackout` | `tc netem loss 100%` 15 s (**interrupción de tráfico de red**) vía contenedor efímero; el ReplicaSet recrea los pods con red limpia |
+| `DbDisconnect` | Service `pharmago-db` aislado 15 s (selector a label inexistente) |
+| `LatencySpike` | lock transaccional `TABLOCKX` + `WAITFOR DELAY` 15 s en SQL Server |
+| `DbHeavyQueries` | consulta con producto cartesiano para saturar la BD |
+| `RateLimitBurst` | 120 peticiones instantáneas desde la IP `10.99.99.99` → ola de 429 |
+| `ScaleZeroBlackout` | pharmacy-service escalado a 0 réplicas por 15 s |
 
-## Escenarios
+## Cobertura de la rúbrica (escenarios de caos)
 
-| # | `-Scenario` | Qué inyecta | Verificación de impacto | Criterio PASS |
-|---|---|---|---|---|
-| 1 | `request` | Ráfaga de 200–1000 requests (según intensidad) + rate-limit test con el generador integrado | CSV de requests | `429 > 0` y `5xx = 0` |
-| 2 | `cpu` | Bucles de CPU en **todos los pods** del target (`workers` por pod según intensidad) | `container_cpu_usage_seconds_total` o `kubectl top` | CPU ≥ 0.25 cores |
-| 3 | `memory` | Asignación concurrente de `${SizeMB}` MB **por réplica** | Memoria working set, `allocated_bytes`, `OOMKilled` | OOM o asignación ≥ 80 % del objetivo |
-| 4 | `storage` | `dd` de `${SizeMB}` MB **por réplica** en `/tmp` | `df -m /tmp` antes/durante/pico | Uso de disco crece ≥ 80 % del objetivo o `No space left` |
-| 5 | `network` | `tc netem loss 100%` en `eth0` de todos los pods del target (o NetworkPolicy deny-egress) | `up{job=...}` y tasa de 5xx | `up` cae a 0 o aparecen 5xx |
-| 6 | `disconnect` | `kubectl scale --replicas=0` o parcheo del selector de un Service | `readyReplicas` / endpoints | Componente no disponible y luego recuperado |
-| 7 | `gametime` | Game Day: tráfico **constante de `-Rate` req/s** (20 por defecto) mientras se disparan **eventos de caos aleatorios** (cpu, memoria, pod eliminado, scale-zero, red, latencia, DB, disco, 429) | CSV completo + reporte por evento | Constancia ≥ 90 % de ventanas, ≥ N eventos, impacto visible y recuperación final |
+| Requisito | Evento / mecanismo |
+|---|---|
+| Inyección de requests | mezcla 10 % de requests inválidas en el tráfico + `RateLimitBurst` (429 con header `Retry-After`) |
+| Sobrecarga de CPU | `CpuSpike` |
+| Sobrecarga de memoria | `LowMemory` (300 MB / 384Mi) |
+| Sobrecarga de storage | `DiskFill` (500 MB) |
+| Interrupción de tráfico de red | `NetemBlackout` (tc netem loss 100 %) |
+| Desconexión de componentes internos | `DbDisconnect` (Service selector) y `ScaleZeroBlackout` (scale 0) |
 
-### Intensidad
-
-Los escenarios de cpu, memory y storage estresan **todas las réplicas del deployment a la vez** (jobs concurrentes por pod).
-
-| `-Intensity` | CPU workers/pod | Memoria/pod | Storage/pod |
-|---|---:|---:|---:|
-| `low` | 2 | 256 MB | 200 MB |
-| `medium` | 4 | 384 MB | 500 MB |
-| `high` | 8 | 512 MB (OOMKill garantizado) | 1024 MB |
-
-`-SizeMB` sobreescribe el tamaño de memoria/storage. La duración default es 60 s;
-usar `-DurationSec 90–120` para una meseta claramente visible en las métricas.
-
-## Ejemplos por escenario
-
-### 1. Request injection
+## Corrida acotada (para automatizar o grabar evidencia)
 
 ```powershell
-# Ráfaga del escenario de la rúbrica (incluye bloque 429)
-.\chaos-ha.ps1 -Scenario request -Intensity high -Force
-
-# Carga sostenida (~5 min, sin bloque 429), útil durante rollouts
-.\chaos-ha.ps1 -Scenario request -LoadTotalRequests 300 -LoadConcurrency 20 -LoadDurationSec 300 -SkipRateLimitTest -Force
-
-# Game Day: 20 req/s constantes + eventos aleatorios que arden todo
-.\chaos-ha.ps1 -Scenario gametime -GameTimeSec 300 -Force
+$env:CHAOS_DURATION_SEC = "420"; .\chaos.ps1
 ```
 
-El generador integrado (`Invoke-TrafficLoad`) produce tráfico mixto contra Users y
-Pharmacy vía API Gateway, con tokens de las credenciales sembradas
-(`admin` / `empleado01` / `owner001`, contraseña `Abcdef12.`). El rate limit es de
-100 req/min por IP: si corrés el escenario con rate-limit test dos veces seguidas,
-esperá ~60 s o el segundo run puede devolver solo `429`. El reporte de la rúbrica
-verifica `429 > 0`, `5xx = 0` y la presencia del header `Retry-After`.
-
-### 2. CPU overload
-
-```powershell
-.\chaos-ha.ps1 -Scenario cpu -Target pharmago-users-service -Intensity high -DurationSec 90 -Force
-```
-
-Golpea todas las réplicas del deployment: 8 busy-loops por pod en `high`.
-
-### 3. Memory overload
-
-```powershell
-.\chaos-ha.ps1 -Scenario memory -Target pharmago-pharmacy-service -SizeMB 512 -DurationSec 90 -Force
-```
-
-El comando asigna 512 MB por réplica (jobs concurrentes): supera el límite de
-384Mi, así que el OOMKill está garantizado en cada réplica; Kubernetes recupera
-los pods y el script espera el rollout. En `kubectl/events-*.txt` quedan los
-`OOMKilled` y reinicios como evidencia.
-
-### 4. Storage overload
-
-```powershell
-.\chaos-ha.ps1 -Scenario storage -Target pharmago-api-gateway -Intensity high -DurationSec 90 -Force
-```
-
-Escribe 1 GB por réplica en `/tmp` (total ~2 GB) y limpia al final. El objetivo
-es demostrar presión de disco efímero, con evidencia en `df-peak.txt`; no toca
-los PVC de SQL Server, Elasticsearch, Prometheus ni Grafana.
-
-### 5. Network interruption
-
-```powershell
-# Recomendado en Minikube: contenedor efímero con NET_ADMIN + tc
-.\chaos-ha.ps1 -Scenario network -Target pharmago-api-gateway -NetworkMode tc -DurationSec 90 -Force
-
-# Alternativa declarativa (puede no aplicarse con el CNI por defecto de Minikube)
-.\chaos-ha.ps1 -Scenario network -Target pharmago-api-gateway -NetworkMode netpol -DurationSec 90 -Force
-```
-
-El modo `tc` crea un contenedor efímero `chaos-net` con la imagen
-`nicolaka/netshoot` en cada pod del target, aplica
-`tc qdisc add dev eth0 root netem loss 100%` y luego borra los pods para eliminar
-los contenedores efímeros. Si el pull de la imagen tarda, el script espera hasta
-90 s por pod.
-
-El modo `netpol` genera y aplica una NetworkPolicy de egreso vacía (se archiva en
-`reports/<run>/network/manifests/`). Con el CNI por defecto de Minikube puede no
-tener efecto; en ese caso el reporte lo indica y sugiere usar `tc`.
-
-### 6. Internal component disconnection
-
-```powershell
-# Apagar temporalmente un microservicio (Deployment)
-.\chaos-ha.ps1 -Scenario disconnect -Target pharmago-pharmacy-service -DisconnectMode scale -DurationSec 90 -Force
-
-# Romper la conectividad al Service de SQL Server sin apagar la DB
-.\chaos-ha.ps1 -Scenario disconnect -Target pharmago-db -DisconnectMode service -DurationSec 90 -Force
-```
-
-El modo `scale` guarda las réplicas originales y las restaura; equivale a la
-validación de auto-curación (self-healing) de la entrega de alta disponibilidad.
-El modo `service` guarda el selector original del Service, lo apunta a un label
-inexistente y lo restaura. Este último es el más seguro para la DB.
-
-### 7. Game Day (trafico constante + caos aleatorio)
-
-```powershell
-.\chaos-ha.ps1 -Scenario gametime -GameTimeSec 600 -Rate 20 -Intensity high -Force
-```
-
-- **Trafico constante**: un pacer interno lanza exactamente `1 request cada
-  1000/-Rate` ms (50 ms = 20 req/s) durante todo el run, con IP rotativa y
-  mezcla de 2xx/4xx. No se bloquea cuando los requests cuelgan (pool de
-  runspaces); si un pod muere, los errores de red quedan registrados.
-- **Eventos aleatorios** cada 10-25 s (sin repetir el anterior): `cpu-spike`,
-  `memory-spike` (OOM con `high`), `kill-pod` (auto-curación), `scale-zero`,
-  `db-disconnect` (Service de SQL aislado 25 s), `disk-fill`, `blackout`
-  (`tc netem loss 100%`), `latency-spike` (`tc netem delay 2000ms` — la p95
-  explota) y `throttle-burst` (ola de 429).
-- **Evidencia**: `gametime/traffic/traffic.csv` con `(timestamp, path, code, ms)`
-  — la línea plana de 20 req/s con los picos de error encima queda lista para
-  Grafana/Excel — y `gametime/events/<n>-<evento>/` con snapshot Prometheus+kubectl
-  por evento, más `summary-gametime.md` con la tabla de impacto por evento.
-- **PASS**: constancia ≥ 90 % de las ventanas de 10s, mínimo `GameTimeSec/60`
-  eventos y al menos un impacto visible (5xx, errores de red, 429, p95 > 1 s),
-  con recuperación final limpia (deployment READY + `/health` OK).
-- El caos golpea a `-ChaosTarget` (default `pharmago-users-service`), no al
-  gateway, para que el port-forward del tráfico sobreviva a los eventos.
+A los 420 s el motor corta solo (mismo `finally`: restauración + resumen + reporte).
+Sin la variable, corre indefinido hasta `Ctrl+C`.
 
 ## Limpieza de emergencia
 
 ```powershell
 .\chaos-cleanup.ps1 -Force
-.\chaos-cleanup.ps1 -RestoreReplicas -Force
 ```
 
-Limpia NetworkPolicies con label `chaos=pharmago`, qdiscs `netem`, archivos
-`/tmp/chaos_fill` y, opcionalmente, restaura réplicas (`2` para microservicios,
-`1` para la DB).
-
-## Evidencia para el informe
-
-Cada escenario deja:
-
-- `prometheus/baseline.json`, `prometheus/impact.json` y `prometheus/peak.json`
-  (en escenarios de recursos el snapshot del pico se captura a mitad del estrés)
-  con CPU, memoria, red, tasa de 5xx, requests, `up` y espacio de nodo.
-- `kubectl/pods-*.txt`, `top-*.txt` (incluye `top-peak.txt` del pico),
-  `events-*.txt` y `describe-*.txt`.
-- `df-peak.txt` en el escenario de storage.
-- `http/requests.csv` en el escenario de requests.
-- `gametime/` en el escenario gametime: `traffic/traffic.csv` (timeline con tasa
-  por segundo), `events/<n>-<evento>/` (impacto por evento) y `summary-gametime.md`.
-- `summary.md` consolidado con PASS/FAIL y detalle.
-
-Para el informe, adjuntar `summary.md`, una captura de Grafana del panel
-correspondiente y el `events-*.txt` donde se vea el reinicio/recuperación.
-
-## Seguridad
-
-- No ejecutar contra un cluster que no sea de laboratorio.
-- El script rechaza targets en `kube-system`, `default` y `kube-public`.
-- `disconnect` restaura réplicas/selector en un bloque `finally`.
-- `network` solo borra los pods target después de aplicar `tc`; la limpieza de
-  qdiscs y contenedores efímeros se ejecuta en un bloque `finally`.
-- `storage` limpia `/tmp/chaos_fill` al final, incluso si el `dd` falla.
+Limpia NetworkPolicies con label `chaos=pharmago`, qdiscs `netem` residuales y
+archivos `/tmp/*` de caos, y restaura réplicas de los deployments.
