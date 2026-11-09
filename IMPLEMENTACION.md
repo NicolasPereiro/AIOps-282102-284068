@@ -92,7 +92,8 @@ Todos los microservicios sin estado (`pharmago-ui`, `pharmago-users-service`, `p
 Para comprobar que durante una actualización no se pierde una sola petición:
 1. Iniciar un flujo continuo de tráfico con el motor integrado en `chaos.ps1`:
    ```powershell
-   $env:CHAOS_DURATION_SEC = "300"; .\chaos.ps1
+   cd "Implementacion K8S\Codigo\chaos-engineering"
+   .\chaos.ps1
    ```
 2. Provocar el reemplazo de componentes (rollout):
    ```bash
@@ -104,8 +105,6 @@ Para comprobar que durante una actualización no se pierde una sola petición:
 ---
 
 ## 4. Telemetría
-
-### Cumplimiento de la rúbrica (según "Obligatorio AIOps")
 
 | Requisito | Estado | Implementación |
 |---|---|---|
@@ -127,177 +126,36 @@ Para comprobar que durante una actualización no se pierde una sola petición:
 - **Alertas de Grafana**:
   - ConfigMap `grafana-alerting.yaml` con 5 reglas de anomalías: tasa de errores HTTP > 5%, latencia media > 1s, rate limit 429 > 5 req/s, CPU pod > 85%, memoria > 85% (riesgo OOM).
   - Montado en el deployment de Grafana bajo `/etc/grafana/provisioning/alerting/`.
-  - Validación integrada en `setup-dashboards.ps1` (consulta `api/v1/provisioning/alert-rules`).
+  - Configuración y aprovisionamiento unificados directamente dentro de `apply-k8s.ps1` y `apply-k8s.sh` (dashboards de Grafana, reglas de alerta, importación de Data Views/Dashboards en Kibana vía `kibana-dashboards.ndjson` y datos de prueba vía `seed-data.sql`).
 
-- **Generador de tráfico y motor de caos (`chaos.ps1`)**:
-  - Ubicación: `Implementacion K8S/Codigo/chaos-engineering/chaos.ps1` — único
-    script de caos, ejecución directa (`.\chaos.ps1`), sin parámetros.
-  - Tráfico constante de **20 req/s exactas**: 20 usuarios virtuales con IP
-    rotativa (`10.100.x.y`) sobre un runspace pool; por segundo se envían 18
-    peticiones válidas + 2 inyectoras de error (400/401/404) contra Users y
-    Pharmacy a través del API Gateway (`http://127.0.0.1:5000`).
-  - Tokens de sesión con las credenciales sembradas (`admin`, `empleado01`,
-    `owner001`, contraseña `Abcdef12.`) para ejercitar endpoints protegidos y
-    generar 401 en accesos sin token.
-  - Consola en vivo (tasa, 2xx/4xx/5xx/429, latencia media y p95) y evidencia
-    persistente en `reports/<timestamp>/`: `traffic.csv` (una fila por segundo)
-    y `summary.md` (totales + eventos ejecutados).
-  - **Test de rate limiting (criterio de la rúbrica)**: evento `RateLimitBurst`
-    dispara 120 requests desde una sola IP (`10.99.99.99`) para saturar el
-    límite de 100 req/min y activar el `FailedRequestsThrottlingMiddleware`
-    → ola de 429 con header `Retry-After`. El rate limit es por IP: esperar
-    ~60 s entre corridas con ese bloque.
-  - Port-forward automático al gateway (levanta el forward si no está activo).
-  - `Ctrl+C` corta la sesión y el `finally` restaura el cluster (réplicas de
-    deployments, selector del Service de la DB, archivos `/tmp` en pods).
-  - Para corridas automatizadas acotadas: `$env:CHAOS_DURATION_SEC = "420"`
-    corta el motor a los 420 s en forma ordenada; sin la variable corre
-    indefinido hasta `Ctrl+C`.
-
----
-
-## 5. Tareas Pendientes
-
-- [x] **Script de Ingeniería del Caos para Alta Disponibilidad**: `chaos.ps1` (`Implementacion K8S/Codigo/chaos-engineering/`) — game day con tráfico constante de 20 req/s y eventos de caos aleatorios que validan la auto-curación de pods (caídas forzadas), el patrón de mitigación ante solicitudes fallidas (ola de 429 con `Retry-After`, mezcla con requests inválidas), la desconexión de componentes internos (aislamiento del Service de la DB y scale-zero) y la interrupción de tráfico de red (`tc netem loss`). Ctrl+C (o `CHAOS_DURATION_SEC`) restaura el cluster automáticamente y deja la evidencia en `reports/<timestamp>/`.
-
----
-
-## 6. Entrega 3 — Detección de anomalías, contención y caos
-
-### Informe corto
-
-La entrega cumple los tres ítems de la rúbrica con evidencia ejecutada: dos
-detectores de anomalías implementados sobre el dataset provisto por los docentes,
-un plan de contención de incidentes operacionales y un script de caos que prueba
-las seis inyecciones exigidas.
-
-- **Detección de anomalías (§6.1):** Isolation Forest y One-Class SVM con kernel
-  RBF sobre la notebook docente, ejecutada de punta a punta; las preguntas de
-  cierre y el exit ticket se resuelven **dentro de la propia notebook** (sección
-  9), citando las tablas y gráficos ejecutados.
-- **Plan de contención (§6.2):** propuesta de diseño de gestión basada en el
-  Incident Management Lifecycle de Atlassian, adaptada a 2 integrantes y
-  versionada en el repositorio como única fuente de verdad: cada etapa se
-  implementa con una ceremonia y sus artefactos (brief de cambio de guardia,
-  War Room, Incident Log, checklist de recuperación, blameless postmortem) y sus
-  runbooks espejan los escenarios probados por el script de caos, de modo que el
-  plan sirve como guía de acción real ante cada falla inyectada.
-- **Scripts de caos (§6.3):** game day con tráfico constante de 20 req/s y
-  eventos que cubren las seis inyecciones (requests, CPU, memoria, storage,
-  interrupción de red y desconexión de componentes), con la validación live
-  documentada en §6.4.
-
-### 6.1 Detección de anomalías (Isolation Forest + SVM RBF)
-
-Implementación en `Implementacion K8S/Codigo/anomaly-detection/`, centrada en la
-notebook docente resuelta y ejecutada: `anomaly-detection-notebook.ipynb`
-(semilla 42, outputs conservados).
-
-| Requisito de la rúbrica | Dónde se cumple |
-|---|---|
-| IsolationForest | Sección 6 de la notebook, con submuestreo `contamination` y score `-decision_function` |
-| Support Vector Machine con kernel RBF | Sección 7: `OneClassSVM(kernel="rbf", gamma="scale")`, entrenado solo con datos normales |
-| Baseline univariado | Sección 4–5: k-sigma y MAD (TODOs del docente resueltos) |
-| Comparación y gráficos | Sección 8 |
-| Preguntas de cierre | Sección 9 |
-
-Ejecución:
-
-```bash
-docker run --rm -v "${PWD}:/app" \
-  -w "/app/Implementacion K8S/Codigo/anomaly-detection" \
-  python:3.11-slim bash -lc \
-  "pip install --no-cache-dir -r requirements-notebook.txt && \
-   jupyter nbconvert --to notebook --execute --inplace \
-   anomaly-detection-notebook.ipynb"
-```
-
-Resultado sobre el dataset del práctico (300 ventanas, 53 anomalías, 17,7 %):
-
-| Detector | Precision | Recall | F1 | Alertas |
-|---|---:|---:|---:|---:|
-| k-sigma error | 1.000 | 0.189 | 0.317 | 10 |
-| k-sigma latencia | 1.000 | 0.151 | 0.262 | 8 |
-| MAD error | 0.944 | 0.321 | 0.479 | 18 |
-| MAD latencia | 1.000 | 0.679 | 0.809 | 36 |
-| Isolation Forest | 0.800 | 0.453 | 0.578 | 30 |
-| One-Class SVM RBF | 0.621 | 0.340 | 0.439 | 29 |
-
-El dataset es el que incluye la notebook docente, y la estructura original
-(sus secciones y sus TODOs) se conserva.
-
-### 6.2 Plan de gestión y contención de incidentes
-
-Documento: `Implementacion K8S/Codigo/chaos-engineering/PLAN-CONTENCION-INCIDENTES.md`.
-
-El plan sigue la estructura de cinco fases del Incident Management Lifecycle:
-
-- **Prepare:** alcance, inventario/dependencias, roles (Incident Commander,
-  Responders, Stakeholders), on-call y escalamiento, matriz de severidad,
-  playbooks/runbooks y documentación/tracking.
-- **Detect:** Golden Signals, alertas accionables, logs estructurados JSON,
-  trazas distribuidas y MTTD.
-- **Respond:** confirmación y triaje, War Room, Incident Log, comunicación con
-  stakeholders y MTTA.
-- **Recover:** rollback, degradación controlada, circuit breaker, rate limiting,
-  checklist de validación post-recuperación y MTTR/TTRS.
-- **Learn:** blameless postmortem, timeline, causa raíz, corrección vs acción
-  correctiva, MTBF/MTBSI y validación con chaos engineering.
-
-Es la única copia del plan: se eliminaron las copias de `docs/` y el contenido
-que no formaba parte de esta estructura. Cada etapa se **implementa** con una
-ceremonia y sus artefactos (tabla de "Diseño de gestión" al inicio del
-documento); la documentación asociada (runbooks, evidencia de caos) vive en el
-repositorio como se pide en la consigna.
-
-### 6.3 Caos orquestado (Game Day con tráfico constante)
-
-Punto de entrada: `Implementacion K8S/Codigo/chaos-engineering/chaos.ps1`
-(ejecución directa `.\chaos.ps1`; Ctrl+C o `$env:CHAOS_DURATION_SEC` corta con
-restauración automática).
-
-Engine: **20 req/s constantes** (18 peticiones válidas + 2 inyectoras de error
-por segundo, 20 usuarios virtuales con IP rotativa) + **un evento de caos
-aleatorio cada 20-25 s**. Evidencia: consola en vivo y `reports/<timestamp>/`
-(`traffic.csv` por segundo + `summary.md` con totales y eventos ejecutados).
-
-| Inyección de la rúbrica | Evento de caos |
-|---|---|
-| Inyección de requests | Mezcla del tráfico (10% inválidas: 400/401/404) + `RateLimitBurst` (ráfaga desde una IP única → 429 con `Retry-After`) |
-| Sobrecarga de CPU | `CpuSpike` — busy-loops 20 s en todos los pods de users-service |
-| Sobrecarga de memoria | `LowMemory` — 300 MB en pods de pharmacy (límite 384Mi → uso > 85%) |
-| Sobrecarga de storage | `DiskFill` — archivo de 500 MB en `/tmp` del gateway |
-| Interrupción de tráfico de red | `NetemBlackout` — `tc netem loss 100%` 15 s vía contenedor efímero `chaos-net`; el ReplicaSet recrea los pods con red limpia |
-| Desconexión de componentes internos | `DbDisconnect` (Service de SQL aislado) y `ScaleZeroBlackout` (pharmacy a 0 réplicas) |
-| Extras del Game Day | `KillPod*` de los 3 microservicios, `LatencySpike` (lock transaccional en SQL) y `DbHeavyQueries` |
-
-Los efectos se observan en la consola y en `traffic.csv`: caída de disponibilidad
-durante `DbDisconnect`/`LatencySpike` (5xx en endpoints con BD), `netErr`/p95
-elevado durante `NetemBlackout`, ola de 429 en los bursts y auto-curación de los
-pods eliminados en segundos. Limpieza de emergencia: `chaos-cleanup.ps1`.
-
-### 6.4 Validación realizada
-
-- Notebook docente ejecutada de punta a punta con Docker/nbconvert; incluye los
-  `TODO` resueltos, IsolationForest (sección 6) y One-Class SVM RBF (sección 7),
-  comparación y gráficos, conservando las preguntas de cierre. La sección 9
-  (preguntas y exit ticket) quedó respondida dentro de la propia notebook,
-  citando las tablas y gráficos ejecutados.
-- `chaos.ps1` (Game Day de caos, corrida de validación de ~7 min con
-  `CHAOS_DURATION_SEC=420`): **6.460 requests a 20 req/s constantes** (tasa
-  20/s estable en `traffic.csv`), 3.109 × 2xx, 2.971 × 4xx, 363 × 5xx,
-  **2.019 × 429** y 17 errores de red; 9 eventos de caos ejecutados con impacto
-  visible en vivo (`RateLimitBurst` ×2, `CpuSpike`, `KillPodGateway` con
-  port-forward automático, `NetemBlackout` con p95 hasta 8 s, `LowMemory`,
-  `KillPodUsers`, `DbDisconnect` ×2) y restauración limpia del cluster al
-  finalizar (cleanup PASS). Evidencia:
-  `chaos-engineering/reports/20261108-132640/` (`summary.md` + `traffic.csv`
-  por segundo).
-- Suite ejecutada con Minikube, `metrics-server` habilitado y datos de
-  `Backend/seed-data.sql` aplicados para que login y endpoints protegidos respondan.
-
-### 6.5 Pendientes
-
-- [x] Ejecutar la suite de caos completa contra el cluster local y archivar evidencias.
-- [ ] Adjuntar capturas de Grafana/Kibana al informe final.
-- [x] Incorporar y resolver la notebook docente de detectores (IF y One-Class SVM RBF).
+- **Script de Chaos Engineering y Tráfico Constante (`chaos.ps1`)**:
+  - Ubicación: `Implementacion K8S/Codigo/chaos-engineering/chaos.ps1`.
+  - **Ejecución directa y automatizada**: No requiere parámetros ni decoradores de entrada (`.\chaos.ps1`). Todo el flujo está preconfigurado.
+  - **Tráfico constante a 20 req/s con 20 usuarios simulados**:
+    - Genera exactamente 20 peticiones por segundo simulando 20 usuarios concurrentes (`User-01` a `User-20`) con IPs virtuales rotativas independientes.
+    - Utiliza un pool asíncrono de runspaces (32 hilos) que mantiene estable la cadencia de 20 req/s independientemente de la latencia o degradación inducida en el backend.
+    - **Distribución estricta 90% / 10%**:
+      - **90% (18 req/s)** dirigidas a endpoints válidos con respuesta esperada `200 OK` (públicos y protegidos con tokens JWT de `admin`, `empleado01` y `owner001`).
+      - **10% (2 req/s)** diseñadas para inducir errores controlados de cliente (`400 Bad Request`, `401 Unauthorized`, `404 Not Found`).
+  - **Resiliencia de conectividad (Auto-port-forward)**:
+    - Detecta y reconecta de forma automática en background el túnel `port-forward` al API Gateway (`http://127.0.0.1:5000`) si este se desconecta al ser eliminado el pod del Gateway durante una prueba de caos.
+  - **Inyección aleatoria de eventos de caos en paralelo**:
+    - Mientras el flujo de 20 req/s permanece constante, se dispara automáticamente un evento de caos cada 20–25 segundos (sin repetir el anterior):
+      1. **Caída de pod (API Gateway)**: Elimina un pod aleatorio del Gateway, verifica la auto-curación del ReplicaSet y reconecta el túnel si es necesario.
+      2. **Caída de pod (Users Service)**: Elimina un pod de `users-service` y valida la derivación de tráfico a la réplica restante.
+      3. **Caída de pod (Pharmacy Service)**: Elimina un pod de `pharmacy-service` y valida la auto-curación.
+      4. **Caída / Aislamiento de Base de Datos**: Aísla temporalmente el Service `pharmago-db` durante 15 s observando errores 500 en rutas dependientes de datos y restaurando el selector automáticamente.
+      5. **Inducción de latencia**: Inyecta bloqueos transaccionales con `WAITFOR DELAY` en SQL Server elevando la latencia p95 por encima de 1.200 ms sin reiniciar pods ni requerir imágenes externas.
+      6. **Spike de CPU**: Ejecuta busy-loops paralelos en las réplicas del microservicio objetivo llevando el uso de CPU al 100% de su límite asignado durante 20 s.
+      7. **Poca memoria disponible**: Asigna buffers de memoria en los pods superando el 85% del límite (riesgo OOM) durante 18 s y los libera de forma segura.
+      8. **Aumento de disco**: Escribe 500 MB en `/tmp` del pod objetivo comprobando el aumento con `df -h` y liberando el espacio tras 15 s.
+      9. **Ráfaga de Rate-Limit (HTTP 429)**: Lanza una ráfaga DoS desde una IP atacante aislada (`10.99.99.99`) para forzar la activación de las reglas de rate-limiting y throttling del Gateway.
+      10. **Apagado total temporal de microservicio (Scale 0)**: Escala temporalmente un microservicio a 0 réplicas (errores 502/503 en Gateway) y lo restaura automáticamente a 2 réplicas.
+      11. **Tormenta de queries pesadas en SQL**: Lanza consultas masivas concurrentes contra SQL Server para estresar el motor de base de datos.
+  - **Monitoreo en vivo y restauración limpia**:
+    - Muestra en consola un ticker segundo a segundo con el estado en tiempo real (tasa real, códigos 2xx, 4xx, 5xx, 429, latencia media y percentil 95).
+    - Muestra banners claros con el inicio y fin de cada evento de caos.
+    - Captura interrupciones (`Ctrl+C`) en un bloque `finally` para asegurar que las réplicas se restauren a 2, el Service de la DB quede enrutado y los archivos temporales se eliminen.
+  - **Carga de datos de prueba y Dashboards en el despliegue**:
+    - La inicialización de [`seed-data.sql`](file:///c:/ID/AIOps-282102-284068/Implementacion%20K8S/Codigo/Backend/seed-data.sql) se integró directamente en el paso 10 de [`apply-k8s.ps1`](file:///c:/ID/AIOps-282102-284068/Implementacion%20K8S/Codigo/k8s/apply-k8s.ps1) y [`apply-k8s.sh`](file:///c:/ID/AIOps-282102-284068/Implementacion%20K8S/Codigo/k8s/apply-k8s.sh), garantizando que la base de datos quede poblada de forma idempotente desde el primer despliegue del cluster.
+    - El aprovisionamiento de Dashboards y Data Views de Kibana ([`kibana-dashboards.ndjson`](file:///c:/ID/AIOps-282102-284068/Implementacion%20K8S/Codigo/k8s/kibana-dashboards.ndjson)) y los ConfigMaps de Grafana se integraron en el paso 11 de `apply-k8s.ps1` y `apply-k8s.sh`, unificando todo el ciclo de vida de la infraestructura, datos y observabilidad en un único comando.

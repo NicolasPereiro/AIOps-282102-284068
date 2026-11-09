@@ -14,19 +14,20 @@ namespace PharmaGo.ApiGateway.Middleware
         private readonly RequestDelegate _next;
         private readonly IMemoryCache _cache;
         private readonly ILogger<FailedRequestsThrottlingMiddleware> _logger;
-
-        // Umbral de tolerancia a fallas por ventana
-        private const int MaxFailedRequestsPerMinute = 15;
-        private const int PenaltyDurationSeconds = 60;
+        private readonly int _maxFailedRequestsPerMinute;
+        private readonly int _penaltyDurationSeconds;
 
         public FailedRequestsThrottlingMiddleware(
             RequestDelegate next,
             IMemoryCache cache,
-            ILogger<FailedRequestsThrottlingMiddleware> logger)
+            ILogger<FailedRequestsThrottlingMiddleware> logger,
+            IConfiguration configuration)
         {
             _next = next;
             _cache = cache;
             _logger = logger;
+            _maxFailedRequestsPerMinute = configuration.GetValue<int?>("FailedRequestsThrottling:MaxFailedRequestsPerMinute") ?? 30;
+            _penaltyDurationSeconds = configuration.GetValue<int?>("FailedRequestsThrottling:PenaltyDurationSeconds") ?? 15;
         }
 
         public async Task InvokeAsync(HttpContext context)
@@ -64,8 +65,10 @@ namespace PharmaGo.ApiGateway.Middleware
             // 2. Ejecutar la llamada al downstream
             await _next(context);
 
-            // 3. Evaluar si la respuesta fue un error (status >= 400)
-            if (context.Response.StatusCode >= 400)
+            // 3. Evaluar si la respuesta fue un error atribuible al cliente (HTTP 4xx, excluyendo 429)
+            // IMPORTANTE: NO penalizar al cliente por errores del servidor (HTTP 5xx, ej. caídas de microservicios downstream)
+            // ni por respuestas que ya son rechazos por limitación de tasa (HTTP 429).
+            if (context.Response.StatusCode >= 400 && context.Response.StatusCode < 500 && context.Response.StatusCode != (int)HttpStatusCode.TooManyRequests)
             {
                 var now = DateTime.UtcNow;
                 var windowKey = $"failed_req_count:{clientIp}:{now:yyyyMMddHHmm}";
@@ -78,12 +81,12 @@ namespace PharmaGo.ApiGateway.Middleware
 
                 _cache.Set(windowKey, failureCount, TimeSpan.FromMinutes(1));
 
-                if (failureCount >= MaxFailedRequestsPerMinute)
+                if (failureCount >= _maxFailedRequestsPerMinute)
                 {
-                    var expiry = DateTime.UtcNow.AddSeconds(PenaltyDurationSeconds);
-                    _cache.Set(penaltyKey, expiry, TimeSpan.FromSeconds(PenaltyDurationSeconds));
+                    var expiry = DateTime.UtcNow.AddSeconds(_penaltyDurationSeconds);
+                    _cache.Set(penaltyKey, expiry, TimeSpan.FromSeconds(_penaltyDurationSeconds));
                     _logger.LogWarning("Client {ClientIp} exceeded failed requests threshold ({Count}/{Max}). Throttled for {Seconds}s.",
-                        clientIp, failureCount, MaxFailedRequestsPerMinute, PenaltyDurationSeconds);
+                        clientIp, failureCount, _maxFailedRequestsPerMinute, _penaltyDurationSeconds);
                 }
             }
         }

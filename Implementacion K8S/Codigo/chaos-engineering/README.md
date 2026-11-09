@@ -1,8 +1,44 @@
 # Chaos Engineering — PharmaGo
 
-`chaos.ps1`: motor de **Game Day de caos** con **tráfico constante de 20 req/s**
-contra la API local y **eventos de caos aleatorios** encima. Ejecución directa,
-sin parámetros:
+Escenarios de caos para validar detección, contención y recuperación. El punto de
+entrada es **`chaos.ps1`**: un único script autocontenido que genera tráfico constante
+de 20 req/s simulando 20 usuarios (90% respuestas 200 OK y 10% errores 4xx) mientras
+dispara eventos de caos aleatorios en paralelo, con auto-reconexión de port-forward y
+monitoreo segundo a segundo en vivo por terminal.
+
+```text
+chaos-engineering/
+├── chaos.ps1                     ← Script principal de caos (20 req/s 90/10 + 12 eventos aleatorios (incluye spike a 100 req/s))
+├── chaos-cleanup.ps1             ← Limpieza/restauración de emergencia (Recover)
+├── PLAN-CONTENCION-INCIDENTES.md ← Plan operativo (Prepare/Detect/Respond/Recover/Learn)
+└── README.md
+```
+
+El plan operativo completo (Prepare, Detect, Respond, Recover y Learn) está en
+[`PLAN-CONTENCION-INCIDENTES.md`](PLAN-CONTENCION-INCIDENTES.md). Es la única copia
+canónica del plan y vive dentro de la carpeta de código.
+
+## Requisitos
+
+1. Minikube con el stack desplegado:
+
+   ```bash
+   minikube start --memory=6144 --cpus=4
+   kubectl label node minikube workload=platform --overwrite
+   ```
+
+2. Despliegue de la aplicación aplicado (la base de datos se inicializa automáticamente con `seed-data.sql` en el paso 10):
+
+   ```powershell
+   cd ..\k8s
+   .\apply-k8s.ps1
+   ```
+
+3. PowerShell 7+ o Windows PowerShell 5.1.
+
+## Uso rápido
+
+El script está 100% preconfigurado y no requiere parámetros ni decoradores de entrada:
 
 ```powershell
 .\chaos.ps1

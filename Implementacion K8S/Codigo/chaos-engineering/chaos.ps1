@@ -149,7 +149,10 @@ for ($u = 1; $u -le $SimulatedUsers; $u++) {
 
 # Script ejecutado por cada hilo de envio HTTP
 $WorkerScript = {
-    param($BaseUrl, $Method, $Path, $Body, $Headers, $VirtualIp, $UserId, $ExpectError, $Ts)
+    param($BaseUrl, $Method, $Path, $Body, $Headers, $VirtualIp, $UserId, $ExpectError, $Ts, $DelayMs)
+    if ($DelayMs -gt 0) {
+        Start-Sleep -Milliseconds $DelayMs
+    }
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $status = 0
     $errText = ""
@@ -163,7 +166,7 @@ $WorkerScript = {
             Method = $Method
             Headers = $reqHeaders
             UseBasicParsing = $true
-            TimeoutSec = 8
+            TimeoutSec = 10
         }
         if ($Body) {
             $params.Body = $Body
@@ -178,20 +181,21 @@ $WorkerScript = {
         $errText = $_.Exception.Message
     }
     $sw.Stop()
+    $totalElapsed = [math]::Round($sw.Elapsed.TotalMilliseconds + $(if ($DelayMs -gt 0) { $DelayMs } else { 0 }), 1)
     return [pscustomobject]@{
         Ts          = $Ts
         UserId      = $UserId
         Method      = $Method
         Path        = $Path
         StatusCode  = $status
-        ElapsedMs   = [math]::Round($sw.Elapsed.TotalMilliseconds, 1)
+        ElapsedMs   = $totalElapsed
         ExpectError = $ExpectError
         Error       = $errText
     }
 }
 
-# Inicializar RunspacePool para despachar peticiones concurrentes a 20 req/s exactas
-$runspacePool = [runspacefactory]::CreateRunspacePool(1, 32)
+# Inicializar RunspacePool para despachar peticiones concurrentes (soporta picos de hasta 100 req/s)
+$runspacePool = [runspacefactory]::CreateRunspacePool(1, 150)
 $runspacePool.Open()
 $pendingRequests = New-Object System.Collections.ArrayList
 
@@ -254,22 +258,36 @@ function Chaos-DbDisconnect {
 
 function Chaos-LatencySpike {
     Write-EventBanner "INDUCCION DE LATENCIA" "Inyectando retraso transaccional de 1.5s en SQL Server y micro-pausas"
-    Write-Host "  -> Inyectando lock transaccional con WAITFOR DELAY '00:00:01.400' en SQL Server..." -ForegroundColor Yellow
+    Write-Host "  -> Inyectando contencion transaccional pesimista en SQL Server y micro-pausas..." -ForegroundColor Yellow
     
     $dbPod = ([string](kubectl get pod -n $Namespace -l app=pharmago-db -o jsonpath='{.items[0].metadata.name}' 2>$null)).Trim()
     if ($dbPod) {
-        # Ejecutar en background una transaccion con delay en SQL
+        # 1. Poner temporalmente la BD en aislamiento pesimista para que TABLOCKX bloquee lecturas concurrentes
+        kubectl exec -i -n $Namespace $dbPod -- /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "Str0ngP@ssword!" -C -Q "ALTER DATABASE PharmaDb SET READ_COMMITTED_SNAPSHOT OFF WITH ROLLBACK IMMEDIATE;" 2>&1 | Out-Null
+
+        # 2. Inyectar bloqueos continuos en background sobre tablas Drugs y Pharmacys
         $sqlJob = Start-Job -ScriptBlock {
             param($Pod, $Ns)
-            kubectl exec -i -n $Ns $Pod -- /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "Str0ngP@ssword!" -C -d PharmaDb -Q "BEGIN TRAN; SELECT TOP 1 * FROM Roles WITH (TABLOCKX); WAITFOR DELAY '00:00:15'; COMMIT;" 2>&1
+            for ($k = 0; $k -lt 10; $k++) {
+                kubectl exec -i -n $Ns $Pod -- /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "Str0ngP@ssword!" -C -d PharmaDb -Q "BEGIN TRAN; SELECT TOP 1 * FROM Drugs WITH (TABLOCKX); SELECT TOP 1 * FROM Pharmacys WITH (TABLOCKX); WAITFOR DELAY '00:00:01.400'; COMMIT;" 2>&1 | Out-Null
+                Start-Sleep -Milliseconds 200
+            }
         } -ArgumentList $dbPod, $Namespace
+
+        # 3. Activar bandera de latencia en el generador de peticiones
+        $script:inLatencyChaos = $true
 
         for ($s = 1; $s -le 16; $s++) {
             Start-Sleep -Seconds 1
             Process-TrafficBatch
         }
+
+        $script:inLatencyChaos = $false
         Stop-Job $sqlJob -ErrorAction SilentlyContinue
         Remove-Job $sqlJob -Force -ErrorAction SilentlyContinue
+
+        # 4. Restaurar READ_COMMITTED_SNAPSHOT ON
+        kubectl exec -i -n $Namespace $dbPod -- /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "Str0ngP@ssword!" -C -Q "ALTER DATABASE PharmaDb SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE;" 2>&1 | Out-Null
     }
     Write-EventEnd "INDUCCION DE LATENCIA" "Latencia transaccional liberada; p95 volviendo a valores normales."
 }
@@ -279,20 +297,35 @@ function Chaos-CpuSpike {
     $pods = @((kubectl get pods -n $Namespace -l app=pharmago-users-service -o jsonpath='{.items[*].metadata.name}' 2>$null).Trim() -split '\s+' | Where-Object { $_ })
     $jobs = @()
     foreach ($pod in $pods) {
-        Write-Host "  -> Iniciando busy-loops de CPU en $pod (duracion 20s)..." -ForegroundColor Yellow
+        Write-Host "  -> Iniciando 4 busy-loops de CPU en $pod (duracion 30s)..." -ForegroundColor Yellow
         $jobs += Start-Job -ScriptBlock {
             param($Pod, $Ns)
-            kubectl exec -n $Ns $Pod -- sh -c "end=\$(( \$(date +%s) + 20 )); while [ \$(date +%s) -lt \$end ]; do :; done" 2>&1
+            kubectl exec -n $Ns $Pod -- sh -c 'end=$(( $(date +%s) + 30 )); for i in 1 2 3 4; do ( while [ $(date +%s) -lt $end ]; do :; done ) & done; wait' 2>&1
         } -ArgumentList $pod, $Namespace
     }
 
-    for ($s = 1; $s -le 20; $s++) {
+    for ($s = 1; $s -le 30; $s++) {
         Start-Sleep -Seconds 1
         Process-TrafficBatch
     }
     $jobs | Stop-Job -ErrorAction SilentlyContinue
     $jobs | Remove-Job -Force -ErrorAction SilentlyContinue
+    foreach ($pod in $pods) {
+        kubectl exec -n $Namespace $pod -- sh -c 'killall sh 2>/dev/null || true' 2>&1 | Out-Null
+    }
     Write-EventEnd "SPIKE DE CPU" "Procesos de consumo de CPU detenidos; uso de CPU normalizado."
+}
+
+function Chaos-RateSpike100 {
+    Write-EventBanner "SPIKE DE TRAFICO (100 REQ/S)" "Elevando tasa de trafico a 100 req/s durante 15 segundos (5x carga normal)"
+    Write-Host "  -> Despachando rafaga sostenida de 100 req/s (90% 200 OK / 10% 4xx)..." -ForegroundColor Yellow
+    $script:targetRate = 100
+    for ($s = 1; $s -le 15; $s++) {
+        Start-Sleep -Seconds 1
+        Process-TrafficBatch
+    }
+    $script:targetRate = $TargetRate
+    Write-EventEnd "SPIKE DE TRAFICO (100 REQ/S)" "Tasa de trafico normalizada a 20 req/s."
 }
 
 function Chaos-LowMemory {
@@ -437,6 +470,7 @@ $allChaosEvents = @(
     @{ Name = "DbDisconnect";        Action = { Chaos-DbDisconnect } },
     @{ Name = "LatencySpike";        Action = { Chaos-LatencySpike } },
     @{ Name = "CpuSpike";            Action = { Chaos-CpuSpike } },
+    @{ Name = "RateSpike100";        Action = { Chaos-RateSpike100 } },
     @{ Name = "LowMemory";           Action = { Chaos-LowMemory } },
     @{ Name = "DiskFill";            Action = { Chaos-DiskFill } },
     @{ Name = "RateLimitBurst";      Action = { Chaos-RateLimitBurst } },
@@ -457,6 +491,8 @@ $global5xx = 0
 $global429 = 0
 $globalErrors = 0
 $scriptStartTime = [DateTime]::UtcNow
+$script:targetRate = $TargetRate
+$script:inLatencyChaos = $false
 
 # Carpeta de evidencia de la corrida (reports/ esta en .gitignore)
 $reportDir = Join-Path $PSScriptRoot ("reports\" + (Get-Date -Format "yyyyMMdd-HHmmss"))
@@ -480,30 +516,34 @@ function Process-TrafficBatch {
         }
     }
 
-    # 2. Despachar exactamente 20 peticiones para el siguiente segundo (1 por cada uno de los 20 usuarios)
-    # Distribucion estricta: 18 validas (90%) y 2 con error (10%)
-    $usersOrder = 1..$SimulatedUsers | Sort-Object { Get-Random }
+    # 2. Despachar peticiones para el siguiente segundo ($script:targetRate o 20 por defecto)
+    # Distribucion estricta: 90% validas y 10% con error
+    $currentRate = if ($script:targetRate -gt 0) { $script:targetRate } else { $TargetRate }
+    $validCount = [int][math]::Round($currentRate * 0.90)
+    $errorCount = $currentRate - $validCount
     
-    # Seleccionar 18 requests validos
     $scheduled = @()
-    for ($k = 0; $k -lt 18; $k++) {
+    for ($k = 0; $k -lt $validCount; $k++) {
         $reqDef = $validRequests[(Get-Random -Minimum 0 -Maximum $validRequests.Count)]
         $scheduled += @{ Def = $reqDef; ExpectError = $false }
     }
-    # Seleccionar 2 requests inductores de error (400, 401, 404, etc.)
-    for ($k = 0; $k -lt 2; $k++) {
+    for ($k = 0; $k -lt $errorCount; $k++) {
         $reqDef = $errorRequests[(Get-Random -Minimum 0 -Maximum $errorRequests.Count)]
         $scheduled += @{ Def = $reqDef; ExpectError = $true }
     }
-    
-    # Mezclar el orden para repartir entre los 20 usuarios simulados
     $scheduled = $scheduled | Sort-Object { Get-Random }
 
-    for ($idx = 0; $idx -lt $SimulatedUsers; $idx++) {
-        $uId = $usersOrder[$idx]
+    for ($idx = 0; $idx -lt $currentRate; $idx++) {
+        $uId = ($idx % $SimulatedUsers) + 1
         $item = $scheduled[$idx]
         $def = $item.Def
         $vIp = $userIps[$uId]
+
+        # Inyeccion de retardo cuando el caos de latencia transaccional esta activo
+        $delayMs = 0
+        if ($script:inLatencyChaos) {
+            $delayMs = Get-Random -Minimum 1200 -Maximum 1600
+        }
 
         $ps = [powershell]::Create()
         $ps.RunspacePool = $runspacePool
@@ -517,6 +557,7 @@ function Process-TrafficBatch {
         [void]$ps.AddArgument($uId)
         [void]$ps.AddArgument($item.ExpectError)
         [void]$ps.AddArgument((Get-Date).ToString("HH:mm:ss.fff"))
+        [void]$ps.AddArgument($delayMs)
         
         $handle = $ps.BeginInvoke()
         $null = $pendingRequests.Add(@{ PS = $ps; Handle = $handle })
@@ -653,7 +694,19 @@ try {
         kubectl patch service pharmago-db -n $Namespace --type merge -p $restore 2>&1 | Out-Null
     }
 
-    # 4. Limpiar archivos temporales de disco
+    # 4. Asegurar que READ_COMMITTED_SNAPSHOT en SQL Server quede activo
+    $dbPod = ([string](kubectl get pod -n $Namespace -l app=pharmago-db -o jsonpath='{.items[0].metadata.name}' 2>$null)).Trim()
+    if ($dbPod) {
+        kubectl exec -i -n $Namespace $dbPod -- /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "Str0ngP@ssword!" -C -Q "ALTER DATABASE PharmaDb SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE;" 2>&1 | Out-Null
+    }
+
+    # 5. Limpiar procesos de CPU en pods de users-service
+    $userPods = @((kubectl get pods -n $Namespace -l app=pharmago-users-service -o jsonpath='{.items[*].metadata.name}' 2>$null).Trim() -split '\s+' | Where-Object { $_ })
+    foreach ($p in $userPods) {
+        kubectl exec -n $Namespace $p -- sh -c 'killall sh 2>/dev/null || true' 2>&1 | Out-Null
+    }
+
+    # 6. Limpiar archivos temporales de disco
     Write-Host "Limpiando archivos de caos en pods..." -ForegroundColor Cyan
     $allPods = @((kubectl get pods -n $Namespace -o jsonpath='{.items[*].metadata.name}' 2>$null).Trim() -split '\s+' | Where-Object { $_ })
     foreach ($p in $allPods) {
