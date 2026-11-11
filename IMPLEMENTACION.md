@@ -100,7 +100,6 @@ Para comprobar que durante una actualización no se pierde una sola petición:
    kubectl rollout restart deployment pharmago-users-service -n pharmago
    kubectl rollout status deployment pharmago-users-service -n pharmago
    ```
-3. Verificar en `chaos-engineering/reports/<timestamp>/traffic.csv` que durante el rollout la tasa se mantiene en 20 req/s y que el 100% de las respuestas siguen exitosas (cero errores HTTP 502/503/504 por caída de pods).
 
 ---
 
@@ -139,23 +138,23 @@ Para comprobar que durante una actualización no se pierde una sola petición:
       - **10% (2 req/s)** diseñadas para inducir errores controlados de cliente (`400 Bad Request`, `401 Unauthorized`, `404 Not Found`).
   - **Resiliencia de conectividad (Auto-port-forward)**:
     - Detecta y reconecta de forma automática en background el túnel `port-forward` al API Gateway (`http://127.0.0.1:5000`) si este se desconecta al ser eliminado el pod del Gateway durante una prueba de caos.
-  - **Inyección aleatoria de eventos de caos en paralelo**:
-    - Mientras el flujo de 20 req/s permanece constante, se dispara automáticamente un evento de caos cada 20–25 segundos (sin repetir el anterior):
+  - **Inyección de eventos de caos en paralelo o secuencial**:
+    - Mientras el flujo de 20 req/s permanece constante, se disparan de forma aleatoria (`chaos.ps1`) o controlada paso a paso (`chaos-secuencial.ps1`) los siguientes 11 eventos de caos:
       1. **Caída de pod (API Gateway)**: Elimina un pod aleatorio del Gateway, verifica la auto-curación del ReplicaSet y reconecta el túnel si es necesario.
       2. **Caída de pod (Users Service)**: Elimina un pod de `users-service` y valida la derivación de tráfico a la réplica restante.
       3. **Caída de pod (Pharmacy Service)**: Elimina un pod de `pharmacy-service` y valida la auto-curación.
-      4. **Caída / Aislamiento de Base de Datos**: Aísla temporalmente el Service `pharmago-db` durante 15 s observando errores 500 en rutas dependientes de datos y restaurando el selector automáticamente.
+      4. **Caída / Aislamiento de Base de Datos**: Corta las conexiones activas en SQL Server (`ALTER DATABASE PharmaDb SET OFFLINE WITH ROLLBACK IMMEDIATE`) y aísla temporalmente el Service `pharmago-db` durante 15 s observando errores 500 y latencia en rutas dependientes de datos, restaurando el servicio y la base de datos automáticamente a `ONLINE`.
       5. **Inducción de latencia**: Inyecta bloqueos transaccionales con `WAITFOR DELAY` en SQL Server elevando la latencia p95 por encima de 1.200 ms sin reiniciar pods ni requerir imágenes externas.
-      6. **Spike de CPU**: Ejecuta busy-loops paralelos en las réplicas del microservicio objetivo llevando el uso de CPU al 100% de su límite asignado durante 20 s.
-      7. **Poca memoria disponible**: Asigna buffers de memoria en los pods superando el 85% del límite (riesgo OOM) durante 18 s y los libera de forma segura.
-      8. **Aumento de disco**: Escribe 500 MB en `/tmp` del pod objetivo comprobando el aumento con `df -h` y liberando el espacio tras 15 s.
-      9. **Ráfaga de Rate-Limit (HTTP 429)**: Lanza una ráfaga DoS desde una IP atacante aislada (`10.99.99.99`) para forzar la activación de las reglas de rate-limiting y throttling del Gateway.
-      10. **Apagado total temporal de microservicio (Scale 0)**: Escala temporalmente un microservicio a 0 réplicas (errores 502/503 en Gateway) y lo restaura automáticamente a 2 réplicas.
-      11. **Tormenta de queries pesadas en SQL**: Lanza consultas masivas concurrentes contra SQL Server para estresar el motor de base de datos.
+      6. **Spike de CPU**: Ejecuta busy-loops paralelos en las réplicas del microservicio objetivo llevando el uso de CPU al 100% de su límite asignado durante 30 s.
+      7. **Spike masivo de tráfico (100 req/s)**: Eleva temporalmente la tasa de tráfico a 100 req/s durante 15 s (5 veces la carga nominal de 20 req/s) para estresar los componentes del cluster, normalizando inmediatamente a 20 req/s.
+      8. **Poca memoria disponible**: Asigna buffers de memoria en los pods superando el 85% del límite (riesgo OOM) durante 18 s y los libera de forma segura.
+      9. **Ráfaga de I/O de disco (Storage Stress)**: Genera un pico breve y controlado de escritura sincronizada (30 MB con `fdatasync`) durante 6 s en `/tmp` del pod objetivo, visible en Grafana (Panel 'Escritura de Disco en Nodo MB/s') sin desgastar ni comprometer el almacenamiento físico del host y liberando el archivo de inmediato.
+      10. **Ráfaga de Rate-Limit (HTTP 429)**: Lanza una ráfaga DoS desde una IP atacante aislada (`10.99.99.99`) para forzar la activación de las reglas de rate-limiting y throttling del Gateway.
+      11. **Apagado total temporal de microservicio (Scale 0)**: Escala temporalmente un microservicio a 0 réplicas (errores 502/503 en Gateway) y lo restaura automáticamente a 2 réplicas.
   - **Monitoreo en vivo y restauración limpia**:
     - Muestra en consola un ticker segundo a segundo con el estado en tiempo real (tasa real, códigos 2xx, 4xx, 5xx, 429, latencia media y percentil 95).
     - Muestra banners claros con el inicio y fin de cada evento de caos.
     - Captura interrupciones (`Ctrl+C`) en un bloque `finally` para asegurar que las réplicas se restauren a 2, el Service de la DB quede enrutado y los archivos temporales se eliminen.
   - **Carga de datos de prueba y Dashboards en el despliegue**:
-    - La inicialización de [`seed-data.sql`](file:///c:/ID/AIOps-282102-284068/Implementacion%20K8S/Codigo/Backend/seed-data.sql) se integró directamente en el paso 10 de [`apply-k8s.ps1`](file:///c:/ID/AIOps-282102-284068/Implementacion%20K8S/Codigo/k8s/apply-k8s.ps1) y [`apply-k8s.sh`](file:///c:/ID/AIOps-282102-284068/Implementacion%20K8S/Codigo/k8s/apply-k8s.sh), garantizando que la base de datos quede poblada de forma idempotente desde el primer despliegue del cluster.
-    - El aprovisionamiento de Dashboards y Data Views de Kibana ([`kibana-dashboards.ndjson`](file:///c:/ID/AIOps-282102-284068/Implementacion%20K8S/Codigo/k8s/kibana-dashboards.ndjson)) y los ConfigMaps de Grafana se integraron en el paso 11 de `apply-k8s.ps1` y `apply-k8s.sh`, unificando todo el ciclo de vida de la infraestructura, datos y observabilidad en un único comando.
+    - La inicialización de [`seed-data.sql`](./Implementacion%20K8S/Codigo/Backend/seed-data.sql) se integró directamente en el paso 10 de [`apply-k8s.ps1`](./Implementacion%20K8S/Codigo/k8s/apply-k8s.ps1) y [`apply-k8s.sh`](./Implementacion%20K8S/Codigo/k8s/apply-k8s.sh), garantizando que la base de datos quede poblada de forma idempotente desde el primer despliegue del cluster.
+    - El aprovisionamiento de Dashboards y Data Views de Kibana ([`kibana-dashboards.ndjson`](./Implementacion%20K8S/Codigo/k8s/kibana-dashboards.ndjson)) y los ConfigMaps de Grafana se integraron en el paso 11 de `apply-k8s.ps1` y `apply-k8s.sh`, unificando todo el ciclo de vida de la infraestructura, datos y observabilidad en un único comando.

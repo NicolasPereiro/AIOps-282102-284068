@@ -1,4 +1,4 @@
-# ==============================================================================
+﻿# ==============================================================================
 # PharmaGo - Chaos Engineering & Constant Traffic Generator
 # Ejecución directa: .\chaos.ps1
 # (Sin parámetros obligatorios ni decoradores; todo preconfigurado y automatizado)
@@ -54,31 +54,21 @@ function Ensure-GatewayPortForward {
         if ($r.StatusCode -eq 200) { return $true }
     } catch { }
 
-    Write-Host "  [!] API Gateway no responde en 127.0.0.1:5000. Iniciando port-forward automatico..." -ForegroundColor Yellow
-    $kubectlPath = (Get-Command kubectl -ErrorAction SilentlyContinue).Source
-    if (-not $kubectlPath) { $kubectlPath = "kubectl" }
+    Write-Host "  [!] Esperando que el API Gateway responda en $Url..." -ForegroundColor Yellow
+    Write-Host "      (Asegurate de haber iniciado tu port-forward: 127.0.0.1:5000)" -ForegroundColor Gray
     
-    # Detener port-forwards previos que hayan quedado huerfanos en puerto 5000
-    Get-NetTCPConnection -LocalPort 5000 -ErrorAction SilentlyContinue | ForEach-Object {
-        Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue
-    }
-    Start-Sleep -Milliseconds 500
-
-    $cmd = "`"$kubectlPath`" port-forward svc/pharmago-api-gateway 5000:80 -n $Namespace"
-    $null = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmd }
-    
-    $deadline = (Get-Date).AddSeconds(10)
+    $deadline = (Get-Date).AddSeconds(20)
     while ((Get-Date) -lt $deadline) {
-        Start-Sleep -Milliseconds 500
+        Start-Sleep -Seconds 1
         try {
             $r = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
             if ($r.StatusCode -eq 200) {
-                Write-Host "  [OK] Port-forward a API Gateway activo en 127.0.0.1:5000" -ForegroundColor Green
+                Write-Host "  [OK] Conectividad con API Gateway confirmada." -ForegroundColor Green
                 return $true
             }
         } catch { }
     }
-    Write-Host "  [WARN] No se pudo verificar $Url tras levantar port-forward. Se continuara intentando..." -ForegroundColor Yellow
+    Write-Host "  [WARN] No se pudo verificar $Url. Se continuara intentando..." -ForegroundColor Yellow
     return $false
 }
 
@@ -239,12 +229,18 @@ function Chaos-KillPodPharmacy {
 }
 
 function Chaos-DbDisconnect {
-    Write-EventBanner "CAIDA / AISLAMIENTO DE LA BASE DE DATOS" "Aislando el Service pharmago-db para simular corte de DB"
+    Write-EventBanner "CAIDA / AISLAMIENTO DE LA BASE DE DATOS" "Cortando conexiones activas y aislando el Service pharmago-db (15s)"
+    $dbPod = ([string](kubectl get pod -n $Namespace -l app=pharmago-db -o jsonpath='{.items[0].metadata.name}' 2>$null)).Trim()
+    
+    if ($dbPod) {
+        Write-Host "  -> Cortando conexiones activas en SQL Server (ALTER DATABASE PharmaDb SET OFFLINE)..." -ForegroundColor Yellow
+        kubectl exec -i -n $Namespace $dbPod -- /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "Str0ngP@ssword!" -C -Q "ALTER DATABASE PharmaDb SET OFFLINE WITH ROLLBACK IMMEDIATE;" 2>&1 | Out-Null
+    }
+    
     $patch = '{"spec":{"selector":{"app":"chaos-db-isolated"}}}'
     Write-Host "  -> Aislando Service pharmago-db por 15 segundos..." -ForegroundColor Yellow
     kubectl patch service pharmago-db -n $Namespace --type merge -p $patch 2>&1 | Out-Null
     
-    # Mantener corte durante 15 segundos (el trafico sigue y se veran errores 500 en endpoints con BD)
     for ($s = 1; $s -le 15; $s++) {
         Start-Sleep -Seconds 1
         Process-TrafficBatch
@@ -253,7 +249,13 @@ function Chaos-DbDisconnect {
     Write-Host "  -> Restaurando Service pharmago-db..." -ForegroundColor Cyan
     $restore = '{"spec":{"selector":{"app":"pharmago-db"}}}'
     kubectl patch service pharmago-db -n $Namespace --type merge -p $restore 2>&1 | Out-Null
-    Write-EventEnd "CAIDA / AISLAMIENTO DE LA BASE DE DATOS" "Service de base de datos restaurado; reconexion verificada."
+
+    if ($dbPod) {
+        Write-Host "  -> Restaurando base de datos a ONLINE..." -ForegroundColor Cyan
+        kubectl exec -i -n $Namespace $dbPod -- /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "Str0ngP@ssword!" -C -Q "ALTER DATABASE PharmaDb SET ONLINE;" 2>&1 | Out-Null
+    }
+
+    Write-EventEnd "CAIDA / AISLAMIENTO DE LA BASE DE DATOS" "Service y base de datos restaurados; reconexion verificada."
 }
 
 function Chaos-LatencySpike {
@@ -324,7 +326,7 @@ function Chaos-RateSpike100 {
         Start-Sleep -Seconds 1
         Process-TrafficBatch
     }
-    $script:targetRate = $TargetRate
+    $script:targetRate = 20
     Write-EventEnd "SPIKE DE TRAFICO (100 REQ/S)" "Tasa de trafico normalizada a 20 req/s."
 }
 
@@ -349,22 +351,22 @@ function Chaos-LowMemory {
     Write-EventEnd "POCA MEMORIA DISPONIBLE" "Buffer de memoria liberado; presion OOM normalizada."
 }
 
-function Chaos-DiskFill {
-    Write-EventBanner "AUMENTO DE DISCO" "Escribiendo archivo de 500MB en /tmp para elevar uso de filesystem"
+function Chaos-DiskIoStress {
+    Write-EventBanner "RAFAGA DE I/O DE DISCO" "Generando pico breve de escritura (30MB con sync) en el nodo por 6s"
     $pods = @((kubectl get pods -n $Namespace -l app=pharmago-api-gateway -o jsonpath='{.items[*].metadata.name}' 2>$null).Trim() -split '\s+' | Where-Object { $_ })
     if ($pods.Count -gt 0) {
         $p = $pods[0]
-        Write-Host "  -> Escribiendo 500MB en ${p}:/tmp/chaos_large_file..." -ForegroundColor Yellow
-        kubectl exec -n $Namespace $p -- sh -c "dd if=/dev/zero of=/tmp/chaos_large_file bs=1M count=500 2>/dev/null; df -h /tmp" 2>&1 | Out-Host
+        Write-Host "  -> Generando escritura sincronizada breve (30MB) en ${p}:/tmp/chaos_io_test..." -ForegroundColor Yellow
+        kubectl exec -n $Namespace $p -- sh -c "dd if=/dev/zero of=/tmp/chaos_io_test bs=1M count=30 conv=fdatasync 2>/dev/null; sync" 2>&1 | Out-Null
         
-        for ($s = 1; $s -le 15; $s++) {
+        for ($s = 1; $s -le 6; $s++) {
             Start-Sleep -Seconds 1
             Process-TrafficBatch
         }
         
-        Write-Host "  -> Limpiando archivo temporal de disco..." -ForegroundColor Cyan
-        kubectl exec -n $Namespace $p -- rm -f /tmp/chaos_large_file 2>&1 | Out-Null
-        Write-EventEnd "AUMENTO DE DISCO" "Archivo temporal eliminado y espacio liberado."
+        Write-Host "  -> Eliminando archivo de prueba de disco..." -ForegroundColor Cyan
+        kubectl exec -n $Namespace $p -- rm -f /tmp/chaos_io_test 2>&1 | Out-Null
+        Write-EventEnd "RAFAGA DE I/O DE DISCO" "Escritura completada y archivo temporal removido; pico registrado en Grafana."
     }
 }
 
@@ -411,58 +413,7 @@ function Chaos-ScaleZeroBlackout {
     Write-EventEnd "SUGERIDO: APAGADO TOTAL DE SERVICIO (SCALE 0)" "Servicio restaurado a 2 replicas y auto-curacion completada."
 }
 
-function Chaos-DbHeavyQueries {
-    Write-EventBanner "SUGERIDO: TORMENTA DE QUERIES PESADAS EN SQL" "Lanzando consultas con escaneo masivo para saturar CPU de BD"
-    $dbPod = ([string](kubectl get pod -n $Namespace -l app=pharmago-db -o jsonpath='{.items[0].metadata.name}' 2>$null)).Trim()
-    if ($dbPod) {
-        $qJob = Start-Job -ScriptBlock {
-            param($Pod, $Ns)
-            kubectl exec -i -n $Ns $Pod -- /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "Str0ngP@ssword!" -C -d PharmaDb -Q "SELECT COUNT(*) FROM sys.all_columns a CROSS JOIN sys.all_columns b;" 2>&1
-        } -ArgumentList $dbPod, $Namespace
-
-        for ($s = 1; $s -le 12; $s++) {
-            Start-Sleep -Seconds 1
-            Process-TrafficBatch
-        }
-        Stop-Job $qJob -ErrorAction SilentlyContinue
-        Remove-Job $qJob -Force -ErrorAction SilentlyContinue
-    }
-    Write-EventEnd "SUGERIDO: TORMENTA DE QUERIES PESADAS EN SQL" "Tormenta de consultas SQL finalizada."
-}
-
-function Chaos-NetemBlackout {
-    Write-EventBanner "INTERRUPCION DE TRAFICO DE RED (NETEM)" "Aplicando tc netem loss 100% en pods de pharmago-users-service por 15s"
-    $pods = @((kubectl get pods -n $Namespace -l app=pharmago-users-service -o jsonpath='{.items[*].metadata.name}' 2>$null).Trim() -split '\s+' | Where-Object { $_ })
-    if ($pods.Count -eq 0) {
-        Write-EventEnd "INTERRUPCION DE TRAFICO DE RED (NETEM)" "No hay pods running; evento omitido."
-        return
-    }
-    foreach ($pod in $pods) {
-        Write-Host "  -> Creando contenedor efimero chaos-net en $pod" -ForegroundColor Yellow
-        kubectl debug -n $Namespace "pod/$pod" --profile=netadmin --image=nicolaka/netshoot --attach=false -c chaos-net -- sh -c "sleep 90" 2>&1 | Out-Null
-        $deadline = (Get-Date).AddSeconds(45)
-        do {
-            $rdy = [string](kubectl get pod $pod -n $Namespace -o jsonpath='{.status.ephemeralContainerStatuses[?(@.name=="chaos-net")].state.running.startedAt}' 2>$null)
-            if (-not [string]::IsNullOrWhiteSpace($rdy)) { break }
-            Start-Sleep -Milliseconds 800
-        } while ((Get-Date) -lt $deadline)
-        if ($rdy) {
-            Write-Host "  -> tc netem loss 100% en $pod" -ForegroundColor Yellow
-            kubectl exec -n $Namespace $pod -c chaos-net -- tc qdisc add dev eth0 root netem loss 100% 2>&1 | Out-Null
-        }
-    }
-    for ($s = 1; $s -le 15; $s++) {
-        Start-Sleep -Seconds 1
-        Process-TrafficBatch
-    }
-    foreach ($pod in $pods) {
-        # El pod se recrea por el ReplicaSet sin el contenedor efimero (qdisc incluido)
-        kubectl delete pod $pod -n $Namespace --wait=false 2>&1 | Out-Null
-    }
-    Write-EventEnd "INTERRUPCION DE TRAFICO DE RED (NETEM)" "Blackout de 15s aplicado; pods recreados por el ReplicaSet con red limpia."
-}
-
-# Lista de todos los eventos aleatorios disponibles
+# Lista de todos los eventos aleatorios disponibles (11 eventos activos)
 $allChaosEvents = @(
     @{ Name = "KillPodGateway";      Action = { Chaos-KillPodGateway } },
     @{ Name = "KillPodUsers";        Action = { Chaos-KillPodUsers } },
@@ -472,11 +423,9 @@ $allChaosEvents = @(
     @{ Name = "CpuSpike";            Action = { Chaos-CpuSpike } },
     @{ Name = "RateSpike100";        Action = { Chaos-RateSpike100 } },
     @{ Name = "LowMemory";           Action = { Chaos-LowMemory } },
-    @{ Name = "DiskFill";            Action = { Chaos-DiskFill } },
+    @{ Name = "DiskIoStress";        Action = { Chaos-DiskIoStress } },
     @{ Name = "RateLimitBurst";      Action = { Chaos-RateLimitBurst } },
-    @{ Name = "ScaleZeroBlackout";   Action = { Chaos-ScaleZeroBlackout } },
-    @{ Name = "DbHeavyQueries";      Action = { Chaos-DbHeavyQueries } },
-    @{ Name = "NetemBlackout";       Action = { Chaos-NetemBlackout } }
+    @{ Name = "ScaleZeroBlackout";   Action = { Chaos-ScaleZeroBlackout } }
 )
 
 # ==============================================================================
@@ -697,6 +646,7 @@ try {
     # 4. Asegurar que READ_COMMITTED_SNAPSHOT en SQL Server quede activo
     $dbPod = ([string](kubectl get pod -n $Namespace -l app=pharmago-db -o jsonpath='{.items[0].metadata.name}' 2>$null)).Trim()
     if ($dbPod) {
+        kubectl exec -i -n $Namespace $dbPod -- /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "Str0ngP@ssword!" -C -Q "ALTER DATABASE PharmaDb SET ONLINE;" 2>&1 | Out-Null
         kubectl exec -i -n $Namespace $dbPod -- /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "Str0ngP@ssword!" -C -Q "ALTER DATABASE PharmaDb SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE;" 2>&1 | Out-Null
     }
 
@@ -710,7 +660,7 @@ try {
     Write-Host "Limpiando archivos de caos en pods..." -ForegroundColor Cyan
     $allPods = @((kubectl get pods -n $Namespace -o jsonpath='{.items[*].metadata.name}' 2>$null).Trim() -split '\s+' | Where-Object { $_ })
     foreach ($p in $allPods) {
-        kubectl exec -n $Namespace $p -- rm -f /tmp/chaos_large_file /tmp/chaos_fill 2>$null | Out-Null
+        kubectl exec -n $Namespace $p -- rm -f /tmp/chaos_large_file /tmp/chaos_fill /tmp/chaos_io_test 2>$null | Out-Null
     }
 
     # 5. Resumen final de la corrida

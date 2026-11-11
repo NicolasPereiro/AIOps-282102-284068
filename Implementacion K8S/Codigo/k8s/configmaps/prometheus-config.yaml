@@ -15,19 +15,43 @@ data:
           - targets: ['otlp-collector:8889']
       
       - job_name: 'users-service'
-        metrics_path: /metrics
-        static_configs:
-          - targets: ['pharmago-users-service:80']
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names:
+                - pharmago
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            regex: pharmago-users-service
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
       
       - job_name: 'pharmacy-service'
-        metrics_path: /metrics
-        static_configs:
-          - targets: ['pharmago-pharmacy-service:80']
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names:
+                - pharmago
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            regex: pharmago-pharmacy-service
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
       
       - job_name: 'api-gateway'
-        metrics_path: /metrics
-        static_configs:
-          - targets: ['pharmago-api-gateway:80']
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names:
+                - pharmago
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            regex: pharmago-api-gateway
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
 
       - job_name: 'node-exporter'
         metrics_path: /metrics
